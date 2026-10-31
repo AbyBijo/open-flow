@@ -27,6 +27,9 @@ object Store {
     private val totalWordsKey = longPreferencesKey("total_words")
     private val selectedModelKey = stringPreferencesKey("selected_model")
     private val downloadedKey = stringSetPreferencesKey("downloaded_models")
+    private val importedKey = stringSetPreferencesKey("imported_model_files")
+    private val customModelKey = stringPreferencesKey("custom_model_file")
+    private val cacheEnabledKey = androidx.datastore.preferences.core.booleanPreferencesKey("active_cache_enabled")
     private val onboardingDoneKey = androidx.datastore.preferences.core.booleanPreferencesKey("onboarding_done")
     private val themeModeKey = stringPreferencesKey("theme_mode") // system | light | dark
 
@@ -68,6 +71,32 @@ object Store {
     suspend fun saveDownloaded(context: Context, ids: Set<String>) {
         context.openFlowDataStore.edit { it[downloadedKey] = ids }
     }
+
+    suspend fun loadImportedFiles(context: Context): Set<String> =
+        context.openFlowDataStore.data.first()[importedKey] ?: emptySet()
+
+    suspend fun saveImportedFiles(context: Context, files: Set<String>) {
+        context.openFlowDataStore.edit { it[importedKey] = files }
+    }
+
+    suspend fun loadCustomModelFile(context: Context): String? =
+        context.openFlowDataStore.data.first()[customModelKey]
+
+    suspend fun saveCustomModelFile(context: Context, fileName: String?) {
+        context.openFlowDataStore.edit {
+            if (fileName == null) it.remove(customModelKey) else it[customModelKey] = fileName
+        }
+    }
+
+    suspend fun loadCacheEnabled(context: Context): Boolean =
+        context.openFlowDataStore.data.first()[cacheEnabledKey] ?: true
+
+    suspend fun saveCacheEnabled(context: Context, enabled: Boolean) {
+        context.openFlowDataStore.edit { it[cacheEnabledKey] = enabled }
+    }
+
+    fun importedFile(context: Context, fileName: String): File =
+        File(modelsDir(context), fileName)
 
     private fun historyFile(context: Context): File = File(context.filesDir, "history.json")
 

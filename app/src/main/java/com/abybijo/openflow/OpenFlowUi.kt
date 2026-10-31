@@ -89,7 +89,12 @@ fun OpenFlowApp(
     onClearError: () -> Unit,
     onSetThemeMode: (String) -> Unit = {},
     onClearHistory: () -> Unit = {},
-    onShowTutorial: () -> Unit = {}
+    onShowTutorial: () -> Unit = {},
+    onPauseDownload: () -> Unit = {},
+    onResumeDownload: () -> Unit = {},
+    onImportLocal: () -> Unit = {},
+    onUseImported: (String) -> Unit = {},
+    onSetCacheEnabled: (Boolean) -> Unit = {}
 ) {
     var tab by remember { mutableStateOf(Tab.DICTATE) }
     MaterialTheme(colorScheme = if (isDark) DarkScheme else LightScheme) {
@@ -173,8 +178,8 @@ fun OpenFlowApp(
                         onOpenModels = { tab = Tab.MODELS }
                     )
                     Tab.HISTORY -> HistoryScreen(state, onDeleteHistory)
-                    Tab.MODELS -> ModelsScreen(state, onSelectModel, onDownload, onCancelDownload, onDeleteModel)
-                    Tab.SETTINGS -> SettingsScreen(state, onSetThemeMode, onClearHistory, onShowTutorial)
+                    Tab.MODELS -> ModelsScreen(state, onSelectModel, onDownload, onCancelDownload, onDeleteModel, onPauseDownload, onResumeDownload, onImportLocal, onUseImported)
+                    Tab.SETTINGS -> SettingsScreen(state, onSetThemeMode, onClearHistory, onShowTutorial, onSetCacheEnabled)
                 }
                 Spacer(Modifier.height(24.dp))
                 Text(
@@ -223,17 +228,20 @@ private fun DictateScreen(
 ) {
     val clipboard = LocalClipboardManager.current
     val model = state.selectedModel
-    // Selected model only — no download UI here by design.
+    // Current model only — no download UI here by design.
     // Downloading, progress and deleting a model live only in Models.
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Current model", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    Text(model.name, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text(state.currentModelName, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                     Text(
-                        if (state.isSelectedDownloaded) "Downloaded · ${model.sizeMb} MB · ${model.bestFor}"
-                        else "Not downloaded yet · ${model.sizeMb} MB",
+                        when {
+                            state.isModelLoaded -> "Cached in memory · ready instantly"
+                            state.isCurrentModelReady -> "On device · loading into memory…"
+                            else -> "Not downloaded yet · ${model.sizeMb} MB"
+                        },
                         color = Color.Gray,
                         fontSize = 13.sp
                     )
@@ -241,13 +249,13 @@ private fun DictateScreen(
             }
             Spacer(Modifier.height(10.dp))
             OutlinedButton(onClick = onOpenModels) {
-                Text(if (state.isSelectedDownloaded) "Change model in Models" else "Download in Models")
+                Text(if (state.isCurrentModelReady) "Change model in Models" else "Download in Models")
                 Spacer(Modifier.width(6.dp))
                 Icon(painterResource(R.drawable.ic_arrow_right), contentDescription = null, modifier = Modifier.size(18.dp))
             }
-            if (!state.isSelectedDownloaded) {
+            if (!state.isCurrentModelReady) {
                 Spacer(Modifier.height(6.dp))
-                Text("Dictation stays locked until you download this model in Models.", color = Color.Gray, fontSize = 12.sp)
+                Text("Dictation stays locked until you download or import a model in Models.", color = Color.Gray, fontSize = 12.sp)
             }
         }
     }
@@ -267,7 +275,7 @@ private fun DictateScreen(
                     .size((92 * pulse).dp)
                     .clip(CircleShape)
                     .background(if (state.isRecording) Color(0xFFFF3B30) else Blue)
-                    .clickable(enabled = state.isSelectedDownloaded && !state.isDownloading && !state.isLoadingModel) { onToggleRecording() },
+                    .clickable(enabled = state.isCurrentModelReady && !state.isDownloading && !state.isLoadingModel) { onToggleRecording() },
                 contentAlignment = Alignment.Center
             ) {
                 Icon(painterResource(R.drawable.ic_mic), contentDescription = "Microphone", tint = Color.White, modifier = Modifier.size(36.dp))
@@ -276,7 +284,7 @@ private fun DictateScreen(
             Waveform(amplitude = state.amplitude, active = state.isRecording)
             Text(
                 when {
-                    !state.isSelectedDownloaded -> "Download a model in Models to unlock dictation"
+                    !state.isCurrentModelReady -> "Download or import a model in Models to unlock dictation"
                     state.isLoadingModel -> "Loading model… please wait, this can take several seconds for larger models"
                     state.isRecording -> "Listening… live dictation"
                     else -> "Tap the mic to start dictating"
@@ -384,7 +392,11 @@ private fun ModelsScreen(
     onSelectModel: (String) -> Unit,
     onDownload: () -> Unit,
     onCancelDownload: () -> Unit,
-    onDeleteModel: (String) -> Unit
+    onDeleteModel: (String) -> Unit,
+    onPauseDownload: () -> Unit = {},
+    onResumeDownload: () -> Unit = {},
+    onImportLocal: () -> Unit = {},
+    onUseImported: (String) -> Unit = {}
 ) {
     // The ONLY place model download is shown, by design.
     val model = state.selectedModel
@@ -421,6 +433,10 @@ private fun ModelsScreen(
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (state.isDownloading) {
+                    OutlinedButton(onClick = onPauseDownload) { Text("Pause") }
+                    OutlinedButton(onClick = onCancelDownload) { Text("Cancel") }
+                } else if (state.isDownloadPaused) {
+                    Button(onClick = onResumeDownload, colors = ButtonDefaults.buttonColors(containerColor = Blue)) { Text("Resume download") }
                     OutlinedButton(onClick = onCancelDownload) { Text("Cancel") }
                 } else if (!state.downloadedIds.contains(model.id)) {
                     Button(onClick = onDownload, colors = ButtonDefaults.buttonColors(containerColor = Blue)) {
@@ -432,6 +448,35 @@ private fun ModelsScreen(
                     OutlinedButton(onClick = { onDeleteModel(model.id) }) { Text("Delete model") }
                 }
             }
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(onClick = onImportLocal) {
+                Icon(painterResource(R.drawable.ic_download), contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Import local model (.bin)")
+            }
+            Text(
+                "Pick a Whisper .bin you already downloaded from elsewhere (Downloads, Files, etc.). It is copied into the app's internal storage. If its name matches a known model, it is registered as that model; otherwise you can use it directly as a custom model.",
+                color = Color.Gray,
+                fontSize = 12.sp
+            )
+        }
+    }
+    if (state.importedFiles.isNotEmpty()) {
+        Spacer(Modifier.height(16.dp))
+        Text("Imported local models", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color.Gray)
+        Spacer(Modifier.height(6.dp))
+        state.importedFiles.forEach { fileName ->
+            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(fileName, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    if (state.customModelFile == fileName) {
+                        Text("In use", color = Color(0xFF0A7A2E), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    } else {
+                        OutlinedButton(onClick = { onUseImported(fileName) }) { Text("Use") }
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
         }
     }
     Spacer(Modifier.height(16.dp))
@@ -454,7 +499,8 @@ private fun SettingsScreen(
     state: UiState,
     onSetThemeMode: (String) -> Unit,
     onClearHistory: () -> Unit,
-    onShowTutorial: () -> Unit
+    onShowTutorial: () -> Unit,
+    onSetCacheEnabled: (Boolean) -> Unit = {}
 ) {
     val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
@@ -499,7 +545,25 @@ private fun SettingsScreen(
                 }
             }
             Spacer(Modifier.height(12.dp))
-            Text("Default model: ${state.selectedModel.name} — change it in Models.", color = Color.Gray, fontSize = 13.sp)
+            Text("Active caching", fontWeight = FontWeight.SemiBold)
+            Text(
+                if (state.cacheEnabled) "On — downloaded models stay on device, and the current model stays loaded in memory so dictation starts instantly."
+                else "Off — the model is unloaded when you stop dictating, so the next start pays the load time again.",
+                color = Color.Gray,
+                fontSize = 13.sp
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (state.cacheEnabled) {
+                    Button(onClick = { onSetCacheEnabled(true) }, colors = ButtonDefaults.buttonColors(containerColor = Blue)) { Text("Cache on") }
+                    OutlinedButton(onClick = { onSetCacheEnabled(false) }) { Text("Cache off") }
+                } else {
+                    OutlinedButton(onClick = { onSetCacheEnabled(true) }) { Text("Cache on") }
+                    Button(onClick = { onSetCacheEnabled(false) }, colors = ButtonDefaults.buttonColors(containerColor = Blue)) { Text("Cache off") }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Text("Default model: ${state.currentModelName} — change it in Models.", color = Color.Gray, fontSize = 13.sp)
             Spacer(Modifier.height(12.dp))
             Text("History & storage", fontWeight = FontWeight.SemiBold)
             Text(

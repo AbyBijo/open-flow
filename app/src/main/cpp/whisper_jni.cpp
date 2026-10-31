@@ -1,5 +1,6 @@
 #include <jni.h>
 #include <string>
+#include <thread>
 #include <vector>
 #include "whisper.h"
 
@@ -35,6 +36,15 @@ Java_com_abybijo_openflow_whisper_WhisperEngine_nativeTranscribe(
     params.print_timestamps = false;
     params.no_context = true;
     params.single_segment = false;
+    // Speed: use all but one CPU core for transcription. The default
+    // thread count in whisper.cpp is conservative; on a modern phone
+    // this is the single biggest transcription speedup available.
+    {
+        unsigned cores = std::thread::hardware_concurrency();
+        if (cores == 0) cores = 4;
+        if (cores > 8) cores = 8;
+        params.n_threads = static_cast<int>(cores > 1 ? cores - 1 : 1);
+    }
 
     if (whisper_full(ctx, params, samples.data(), static_cast<int>(samples.size())) != 0) {
         return env->NewStringUTF("");

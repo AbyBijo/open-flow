@@ -1,6 +1,10 @@
 package com.abybijo.openflow
 
 import android.app.Application
+import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.abybijo.openflow.whisper.WhisperEngine
@@ -26,7 +30,12 @@ data class UiState(
     val downloadStatus: String? = null,
     val isRecording: Boolean = false,
     val isLoadingModel: Boolean = false,
+    val isModelLoaded: Boolean = false,
+    val isDownloadPaused: Boolean = false,
     val statusMessage: String? = null,
+    val importedFiles: List<String> = emptyList(),
+    val customModelFile: String? = null,
+    val cacheEnabled: Boolean = true,
     val elapsedSeconds: Long = 0L,
     val amplitude: Float = 0f,
     val currentText: String = "",
@@ -38,6 +47,10 @@ data class UiState(
 ) {
     val selectedModel: WhisperModel get() = ModelCatalog.byId(selectedModelId)
     val isSelectedDownloaded: Boolean get() = downloadedIds.contains(selectedModelId)
+    // A custom imported file, when chosen, is the current model regardless
+    // of the catalogue selection.
+    val currentModelName: String get() = customModelFile ?: selectedModel.name
+    val isCurrentModelReady: Boolean get() = customModelFile != null || isSelectedDownloaded
     val currentWordCount: Int get() = countWords(currentText)
 }
 
@@ -65,35 +78,175 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 Store.modelFile(context, ModelCatalog.byId(id)).exists()
             }.toSet()
             if (present != downloaded) Store.saveDownloaded(context, present)
+            val imported = Store.loadImportedFiles(context)
+                .filter { Store.importedFile(context, it).exists() }.sorted()
+            val custom = Store.loadCustomModelFile(context)
+                ?.takeIf { Store.importedFile(context, it).exists() }
+            if (custom == null && Store.loadCustomModelFile(context) != null) {
+                Store.saveCustomModelFile(context, null)
+            }
             _state.update {
                 it.copy(
                     selectedModelId = selected,
                     downloadedIds = present,
+                    importedFiles = imported,
+                    customModelFile = custom,
+                    cacheEnabled = Store.loadCacheEnabled(context),
                     totalWords = Store.loadTotalWords(context),
                     history = Store.loadHistory(context),
                     onboardingDone = Store.loadOnboardingDone(context),
                     themeMode = Store.loadThemeMode(context)
                 )
             }
+            // Active caching: preload the current model in the background
+            // so the first mic tap does not pay the model-load time.
+            preloadCurrentModel()
+        }
+    }
+
+    private fun currentModelFile(): java.io.File {
+        val custom = _state.value.customModelFile
+        return if (custom != null) Store.importedFile(context, custom)
+        else Store.modelFile(context, _state.value.selectedModel)
+    }
+
+    /** Load the current model into memory now, if it is already on disk. */
+    fun preloadCurrentModel() {
+        if (!WhisperEngine.isAvailable) return
+        val state = _state.value
+        if (!state.isCurrentModelReady || state.isModelLoaded || state.isLoadingModel) return
+        _state.update { it.copy(isLoadingModel = true, statusMessage = "Caching ${state.currentModelName} model in memory…") }
+        viewModelScope.launch(Dispatchers.IO) {
+            val eng = engine ?: WhisperEngine().also { engine = it }
+            val loaded = eng.load(currentModelFile())
+            withContext(Dispatchers.Main) {
+                _state.update {
+                    it.copy(
+                        isLoadingModel = false,
+                        isModelLoaded = loaded,
+                        statusMessage = if (loaded) "Model cached & ready — dictation starts instantly." else null,
+                        error = if (loaded) null else "Could not load the model. Try deleting and re-downloading it."
+                    )
+                }
+            }
+        }
+    }
+
+    fun setCacheEnabled(enabled: Boolean) {
+        _state.update { it.copy(cacheEnabled = enabled) }
+        viewModelScope.launch {
+            Store.saveCacheEnabled(context, enabled)
+            if (!enabled) {
+                engine?.close()
+                engine = null
+                _state.update { it.copy(isModelLoaded = false) }
+            } else {
+                preloadCurrentModel()
+            }
         }
     }
 
     fun selectModel(id: String) {
-        _state.update { it.copy(selectedModelId = id, error = null) }
-        viewModelScope.launch { Store.saveSelectedModel(context, id) }
+        // Selecting a catalogue model replaces a custom imported file.
+        engine?.close()
+        engine = null
+        _state.update { it.copy(selectedModelId = id, customModelFile = null, isModelLoaded = false, error = null) }
+        viewModelScope.launch {
+            Store.saveSelectedModel(context, id)
+            Store.saveCustomModelFile(context, null)
+            preloadCurrentModel()
+        }
+    }
+
+    fun useImportedFile(fileName: String) {
+        engine?.close()
+        engine = null
+        _state.update { it.copy(customModelFile = fileName, isModelLoaded = false, error = null) }
+        viewModelScope.launch {
+            Store.saveCustomModelFile(context, fileName)
+            preloadCurrentModel()
+        }
+    }
+
+    fun importLocalModel(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                var displayName: String? = null
+                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0) displayName = cursor.getString(idx)
+                    }
+                }
+                val safeName = (displayName ?: "imported-model.bin")
+                    .replace(Regex("[^A-Za-z0-9._-]"), "_")
+                    .takeIf { it.endsWith(".bin", ignoreCase = true) } ?: "${(displayName ?: "imported-model").replace(Regex("[^A-Za-z0-9._-]"), "_")}.bin"
+                val target = Store.importedFile(context, safeName)
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                } ?: throw IllegalStateException("Could not read the selected file")
+                if (target.length() <= 0L) {
+                    target.delete()
+                    throw IllegalStateException("The selected file is empty")
+                }
+                // If the file is a known catalogue model, register it as
+                // downloaded too, so it works exactly like a download.
+                val known = ModelCatalog.all.firstOrNull { it.fileName.equals(safeName, ignoreCase = true) }
+                val updatedDownloaded = if (known != null) _state.value.downloadedIds + known.id else _state.value.downloadedIds
+                val updatedImported = (_state.value.importedFiles + safeName).sorted()
+                Store.saveImportedFiles(context, updatedImported.toSet())
+                if (known != null) Store.saveDownloaded(context, updatedDownloaded)
+                withContext(Dispatchers.Main) {
+                    if (known != null) {
+                        selectModel(known.id)
+                    } else {
+                        useImportedFile(safeName)
+                    }
+                    _state.update {
+                        it.copy(
+                            downloadedIds = updatedDownloaded,
+                            importedFiles = updatedImported,
+                            statusMessage = "Imported $safeName (${target.length() / 1_000_000} MB) into app storage — ready to use.",
+                            error = null
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    _state.update { it.copy(error = "Import failed: ${e.message}") }
+                }
+            }
+        }
     }
 
     fun downloadSelected() {
         val model = _state.value.selectedModel
         if (_state.value.isDownloading) return
+        startDownload(model, resume = false)
+    }
+
+    fun resumeDownload() {
+        val model = _state.value.selectedModel
+        if (_state.value.isDownloading) return
+        startDownload(model, resume = true)
+    }
+
+    private fun startDownload(model: WhisperModel, resume: Boolean) {
+        val target = Store.modelFile(context, model)
+        val partialMb = ModelDownloader.partialSize(target) / 1_000_000.0
         downloadJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 withContext(Dispatchers.Main) {
                     _state.update {
-                        it.copy(isDownloading = true, downloadFraction = 0f, downloadStatus = "Downloading from Hugging Face…", error = null)
+                        it.copy(
+                            isDownloading = true, isDownloadPaused = false,
+                            downloadFraction = if (resume && partialMb > 0) (partialMb / model.sizeMb).toFloat() else 0f,
+                            downloadDownloadedMb = if (resume) partialMb else 0.0,
+                            downloadStatus = if (resume) "Resuming download…" else "Downloading from Hugging Face…",
+                            error = null
+                        )
                     }
                 }
-                val target = Store.modelFile(context, model)
                 ModelDownloader.download(
                     model = model,
                     target = target,
@@ -114,23 +267,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 Store.saveDownloaded(context, updated)
                 withContext(Dispatchers.Main) {
                     _state.update {
-                        it.copy(isDownloading = false, downloadFraction = 1f, downloadedIds = updated, downloadStatus = "Downloaded & verified")
+                        it.copy(isDownloading = false, isDownloadPaused = false, downloadFraction = 1f, downloadedIds = updated, downloadStatus = "Downloaded & verified")
                     }
                 }
+                preloadCurrentModel()
             } catch (e: InterruptedException) {
+                // Pause keeps the partial file; cancel deletes it (below).
                 withContext(Dispatchers.Main) {
-                    _state.update { it.copy(isDownloading = false, downloadStatus = "Download cancelled") }
+                    if (_state.value.isDownloadPaused) {
+                        _state.update { it.copy(isDownloading = false, downloadStatus = "Download paused — tap Resume to continue.") }
+                    } else {
+                        _state.update { it.copy(isDownloading = false, downloadStatus = "Download cancelled") }
+                    }
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    _state.update { it.copy(isDownloading = false, error = e.message ?: "Download failed") }
+                    _state.update { it.copy(isDownloading = false, isDownloadPaused = false, error = e.message ?: "Download failed") }
                 }
             }
         }
     }
 
-    fun cancelDownload() {
+    fun pauseDownload() {
+        _state.update { it.copy(isDownloadPaused = true) }
         downloadJob?.cancel()
+    }
+
+    fun cancelDownload() {
+        _state.update { it.copy(isDownloadPaused = false) }
+        downloadJob?.cancel()
+        viewModelScope.launch(Dispatchers.IO) {
+            ModelDownloader.deletePartial(Store.modelFile(context, _state.value.selectedModel))
+            withContext(Dispatchers.Main) {
+                _state.update { it.copy(downloadFraction = 0f, downloadDownloadedMb = 0.0, downloadStatus = null) }
+            }
+        }
     }
 
     fun deleteModel(id: String) {
@@ -144,7 +315,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             engine?.close()
             engine = null
             withContext(Dispatchers.Main) {
-                _state.update { it.copy(downloadedIds = updated, downloadFraction = 0f, downloadStatus = null) }
+                _state.update { it.copy(downloadedIds = updated, isModelLoaded = false, downloadFraction = 0f, downloadStatus = null) }
             }
         }
     }
@@ -154,25 +325,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Block double-taps while the model is still loading: a second
         // load() call frees the first context and breaks transcription.
         if (state.isRecording || state.isLoadingModel) return
-        if (!state.isSelectedDownloaded) {
-            _state.update { it.copy(error = "Download the selected model first.") }
+        if (!state.isCurrentModelReady) {
+            _state.update { it.copy(error = "Download or import a model first.") }
             return
         }
         if (!WhisperEngine.isAvailable) {
             _state.update { it.copy(error = "Whisper engine is not available in this build. The native library failed to load.") }
             return
         }
-        _state.update { it.copy(isLoadingModel = true, statusMessage = "Loading ${state.selectedModel.name} model…", error = null) }
+        // Active cache hit: model is already loaded in memory, so skip
+        // the load step entirely and start listening immediately.
+        if (state.isModelLoaded) {
+            startRecorderWithEngine(engine!!)
+            return
+        }
+        _state.update { it.copy(isLoadingModel = true, statusMessage = "Loading ${state.currentModelName} model…", error = null) }
         viewModelScope.launch(Dispatchers.IO) {
-            val modelFile = Store.modelFile(context, state.selectedModel)
+            val modelFile = currentModelFile()
             val eng = engine ?: WhisperEngine().also { engine = it }
             val loaded = eng.load(modelFile)
             if (!loaded) {
                 withContext(Dispatchers.Main) {
-                    _state.update { it.copy(isLoadingModel = false, statusMessage = null, error = "Could not load the downloaded Whisper model. Try deleting and re-downloading it.") }
+                    _state.update { it.copy(isLoadingModel = false, isModelLoaded = false, statusMessage = null, error = "Could not load the downloaded Whisper model. Try deleting and re-downloading it.") }
                 }
                 return@launch
             }
+            withContext(Dispatchers.Main) {
+                _state.update { it.copy(isLoadingModel = false, isModelLoaded = true) }
+            }
+            startRecorderWithEngine(eng)
+        }
+    }
+
+    private fun startRecorderWithEngine(eng: WhisperEngine) {
+        viewModelScope.launch(Dispatchers.IO) {
             val rec = Recorder(
                 onAmplitude = { amp ->
                     _state.update { it.copy(amplitude = amp) }
@@ -215,6 +401,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 return@launch
             }
+            // Live foreground: keep the app in the foreground while it
+            // listens/transcribes, so Android does not throttle or kill
+            // the transcription work mid-dictation.
+            try {
+                ContextCompat.startForegroundService(
+                    context,
+                    Intent(context, OpenFlowService::class.java)
+                )
+            } catch (_: Exception) {
+            }
             withContext(Dispatchers.Main) {
                 _state.update { it.copy(isRecording = true, isLoadingModel = false, statusMessage = "Listening… speak now, text appears every few seconds.", error = null) }
             }
@@ -234,6 +430,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         recorder = null
         elapsedJob?.cancel()
         elapsedJob = null
+        try {
+            context.stopService(Intent(context, OpenFlowService::class.java))
+        } catch (_: Exception) {
+        }
+        // Active caching: by default the loaded model stays in memory so
+        // the next dictation starts instantly. Only unload if the user
+        // turned active caching off in Settings.
+        if (!_state.value.cacheEnabled) {
+            engine?.close()
+            engine = null
+            _state.update { it.copy(isModelLoaded = false) }
+        }
         // The final partial chunk is transcribed by the recorder's thread
         // before stop() returns, via the serialised onChunk path above, so
         // do not clear the status here — the transcription may still land.
@@ -253,7 +461,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val entry = HistoryEntry(
             id = System.currentTimeMillis(),
             timestamp = System.currentTimeMillis(),
-            modelName = state.selectedModel.name,
+            modelName = state.currentModelName,
             text = state.currentText.trim(),
             wordCount = state.currentWordCount
         )

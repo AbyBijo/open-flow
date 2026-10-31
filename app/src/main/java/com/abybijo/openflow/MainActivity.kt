@@ -21,6 +21,12 @@ class MainActivity : ComponentActivity() {
         if (granted) viewModel.startRecording()
     }
 
+    private val importModel = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) viewModel.importLocalModel(uri)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -55,7 +61,12 @@ class MainActivity : ComponentActivity() {
                     onClearError = { viewModel.clearError() },
                     onSetThemeMode = { viewModel.setThemeMode(it) },
                     onClearHistory = { viewModel.clearHistory() },
-                    onShowTutorial = { viewModel.showTutorialAgain() }
+                    onShowTutorial = { viewModel.showTutorialAgain() },
+                    onPauseDownload = { viewModel.pauseDownload() },
+                    onResumeDownload = { viewModel.resumeDownload() },
+                    onImportLocal = { importModel.launch("*/*") },
+                    onUseImported = { viewModel.useImportedFile(it) },
+                    onSetCacheEnabled = { viewModel.setCacheEnabled(it) }
                 )
             }
         }
