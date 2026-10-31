@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 data class UiState(
@@ -23,6 +25,8 @@ data class UiState(
     val downloadTotalMb: Double = 0.0,
     val downloadStatus: String? = null,
     val isRecording: Boolean = false,
+    val isLoadingModel: Boolean = false,
+    val statusMessage: String? = null,
     val elapsedSeconds: Long = 0L,
     val amplitude: Float = 0f,
     val currentText: String = "",
@@ -46,6 +50,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var elapsedJob: Job? = null
     private var recorder: Recorder? = null
     private var engine: WhisperEngine? = null
+    // Whisper's context is NOT thread-safe: two chunks transcribed at once
+    // corrupt each other and return empty text. Serialise all transcription.
+    // This was a real failure mode for larger/quantized models, where one
+    // chunk can take longer to transcribe than the next chunk takes to record.
+    private val transcribeMutex = Mutex()
 
     init {
         viewModelScope.launch {
@@ -142,7 +151,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startRecording() {
         val state = _state.value
-        if (state.isRecording) return
+        // Block double-taps while the model is still loading: a second
+        // load() call frees the first context and breaks transcription.
+        if (state.isRecording || state.isLoadingModel) return
         if (!state.isSelectedDownloaded) {
             _state.update { it.copy(error = "Download the selected model first.") }
             return
@@ -151,13 +162,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(error = "Whisper engine is not available in this build. The native library failed to load.") }
             return
         }
+        _state.update { it.copy(isLoadingModel = true, statusMessage = "Loading ${state.selectedModel.name} model…", error = null) }
         viewModelScope.launch(Dispatchers.IO) {
             val modelFile = Store.modelFile(context, state.selectedModel)
             val eng = engine ?: WhisperEngine().also { engine = it }
             val loaded = eng.load(modelFile)
             if (!loaded) {
                 withContext(Dispatchers.Main) {
-                    _state.update { it.copy(error = "Could not load the downloaded Whisper model. Try deleting and re-downloading it.") }
+                    _state.update { it.copy(isLoadingModel = false, statusMessage = null, error = "Could not load the downloaded Whisper model. Try deleting and re-downloading it.") }
                 }
                 return@launch
             }
@@ -167,15 +179,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 },
                 onChunk = { pcm ->
                     viewModelScope.launch(Dispatchers.Default) {
-                        val text = eng.transcribe(pcm).trim()
-                        if (text.isNotBlank()) {
-                            val words = countWords(text).toLong()
-                            val newTotal = _state.value.totalWords + words
-                            Store.saveTotalWords(context, newTotal)
+                        transcribeMutex.withLock {
                             withContext(Dispatchers.Main) {
-                                _state.update { current ->
-                                    val joined = if (current.currentText.isBlank()) text else current.currentText + " " + text
-                                    current.copy(currentText = joined, totalWords = newTotal)
+                                _state.update { it.copy(statusMessage = "Transcribing…") }
+                            }
+                            val text = eng.transcribe(pcm).trim()
+                            if (text.isNotBlank()) {
+                                val words = countWords(text).toLong()
+                                val newTotal = _state.value.totalWords + words
+                                Store.saveTotalWords(context, newTotal)
+                                withContext(Dispatchers.Main) {
+                                    _state.update { current ->
+                                        val joined = if (current.currentText.isBlank()) text else current.currentText + " " + text
+                                        current.copy(currentText = joined, totalWords = newTotal, statusMessage = null)
+                                    }
+                                }
+                            } else {
+                                // Never fail silently: previously a blank
+                                // transcription left the screen unchanged
+                                // with no clue at all. Now the user sees it.
+                                withContext(Dispatchers.Main) {
+                                    _state.update { it.copy(statusMessage = "Heard audio, but no words were recognised in the last chunk. Try speaking closer to the mic, louder, and in full sentences.") }
                                 }
                             }
                         }
@@ -187,12 +211,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 rec.start()
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    _state.update { it.copy(error = "Microphone could not be started: ${e.message}") }
+                    _state.update { it.copy(isLoadingModel = false, statusMessage = null, error = "Microphone could not be started: ${e.message}") }
                 }
                 return@launch
             }
             withContext(Dispatchers.Main) {
-                _state.update { it.copy(isRecording = true, error = null) }
+                _state.update { it.copy(isRecording = true, isLoadingModel = false, statusMessage = "Listening… speak now, text appears every few seconds.", error = null) }
             }
             elapsedJob = viewModelScope.launch {
                 var seconds = 0L
@@ -210,6 +234,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         recorder = null
         elapsedJob?.cancel()
         elapsedJob = null
+        // The final partial chunk is transcribed by the recorder's thread
+        // before stop() returns, via the serialised onChunk path above, so
+        // do not clear the status here — the transcription may still land.
         _state.update { it.copy(isRecording = false, elapsedSeconds = 0L, amplitude = 0f) }
     }
 

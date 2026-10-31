@@ -8,8 +8,10 @@ import kotlin.math.abs
 
 /**
  * 16 kHz mono PCM recorder for Whisper.
- * Emits audio in ~6 second chunks so dictation appears live, chunk by chunk,
- * instead of waiting for the user to stop speaking.
+ * Emits audio in ~3 second chunks so dictation appears live, chunk by chunk,
+ * instead of waiting for the user to stop speaking. 3s (not 6s) matters:
+ * with a 6s chunk plus a slow model, the first words could take 15-20s
+ * to appear, which looks like dictation is broken.
  */
 class Recorder(
     private val onAmplitude: (Float) -> Unit,
@@ -17,7 +19,7 @@ class Recorder(
 ) {
     companion object {
         const val SAMPLE_RATE = 16000
-        const val CHUNK_SAMPLES = SAMPLE_RATE * 6
+        const val CHUNK_SAMPLES = SAMPLE_RATE * 3
     }
 
     private var record: AudioRecord? = null

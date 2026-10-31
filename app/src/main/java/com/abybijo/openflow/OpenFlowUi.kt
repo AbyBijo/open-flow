@@ -267,7 +267,7 @@ private fun DictateScreen(
                     .size((92 * pulse).dp)
                     .clip(CircleShape)
                     .background(if (state.isRecording) Color(0xFFFF3B30) else Blue)
-                    .clickable(enabled = state.isSelectedDownloaded && !state.isDownloading) { onToggleRecording() },
+                    .clickable(enabled = state.isSelectedDownloaded && !state.isDownloading && !state.isLoadingModel) { onToggleRecording() },
                 contentAlignment = Alignment.Center
             ) {
                 Icon(painterResource(R.drawable.ic_mic), contentDescription = "Microphone", tint = Color.White, modifier = Modifier.size(36.dp))
@@ -277,12 +277,17 @@ private fun DictateScreen(
             Text(
                 when {
                     !state.isSelectedDownloaded -> "Download a model in Models to unlock dictation"
+                    state.isLoadingModel -> "Loading model… please wait, this can take several seconds for larger models"
                     state.isRecording -> "Listening… live dictation"
                     else -> "Tap the mic to start dictating"
                 },
                 color = Color.Gray,
                 fontSize = 13.sp
             )
+            state.statusMessage?.let { message ->
+                Spacer(Modifier.height(6.dp))
+                Text(message, color = Blue, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            }
             if (state.isRecording && state.elapsedSeconds > 0) {
                 Text(
                     "Elapsed: %d:%02d".format(state.elapsedSeconds / 60, state.elapsedSeconds % 60),
