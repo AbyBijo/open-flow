@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.OpenFlow" parent="Theme.Material3.DayNight.NoActionBar">
+    <!--
+      Material 3 has no DayNight XML theme in the version used here, which
+      caused AAPT "style/Theme.Material3.DayNight.NoActionBar not found".
+      Use the Light NoActionBar XML theme as the window theme; dark mode
+      is handled in Compose by OpenFlowApp's darkColorScheme, so the
+      in-app UI still follows the system theme.
+    -->
+    <style name="Theme.OpenFlow" parent="Theme.Material3.Light.NoActionBar">
         <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>
