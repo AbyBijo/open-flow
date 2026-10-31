@@ -101,4 +101,8 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.datastore.preferences)
+    // Provides the XML Theme.Material3.* themes. Compose Material 3 alone
+    // (androidx.compose.material3) is Kotlin-only and does not define them,
+    // which is why AAPT could not find Theme.Material3.* before.
+    implementation(libs.google.material)
 }

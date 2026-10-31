@@ -1,13 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--
-      Material 3 has no DayNight XML theme in the version used here, which
-      caused AAPT "style/Theme.Material3.DayNight.NoActionBar not found".
-      Use the Light NoActionBar XML theme as the window theme; dark mode
-      is handled in Compose by OpenFlowApp's darkColorScheme, so the
-      in-app UI still follows the system theme.
+      Theme.Material3.* XML themes come from com.google.android.material,
+      not from androidx.compose.material3 (which is Kotlin-only). That
+      dependency is now in app/build.gradle.kts, so DayNight resolves.
+      Dark mode in the app itself is still handled by Compose.
     -->
-    <style name="Theme.OpenFlow" parent="Theme.Material3.Light.NoActionBar">
+    <style name="Theme.OpenFlow" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>
