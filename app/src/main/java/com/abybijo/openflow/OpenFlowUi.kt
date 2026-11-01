@@ -105,7 +105,11 @@ fun OpenFlowApp(
                     .verticalScroll(rememberScrollState())
                     .padding(20.dp)
             ) {
-                Text("OpenFlow", fontSize = 34.sp, fontWeight = FontWeight.Bold, letterSpacing = (-1).sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(painterResource(R.drawable.ic_openflow_logo), contentDescription = "OpenFlow logo", tint = Color.Unspecified, modifier = Modifier.size(44.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text("OpenFlow", fontSize = 34.sp, fontWeight = FontWeight.Bold, letterSpacing = (-1).sp)
+                }
                 Text(
                     "Free, open-source voice dictation. No account. On-device. Private.",
                     color = Color.Gray,
