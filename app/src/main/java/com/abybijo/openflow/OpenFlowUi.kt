@@ -330,7 +330,19 @@ private fun DictateScreen(
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                "Current dictation: ${state.currentWordCount} words · Live, chunked Whisper transcription — audio never leaves your phone.",
+                "Current dictation: ${state.currentWordCount} words · VAD-utterance Whisper transcription — speak, pause, finished text lands. Audio never leaves your phone.",
+                color = Color.Gray,
+                fontSize = 12.sp
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Diagnostics: audio frames ${state.framesReceived} · utterances ${state.utterancesTranscribed} · last mic level ${"%.3f".format(state.lastRms)}" +
+                    (state.lastRawResult?.let { " · last result: $it" } ?: ""),
+                color = Color.Gray,
+                fontSize = 12.sp
+            )
+            Text(
+                "If frames stay at 0, the mic is not delivering audio. If utterances rise but text stays empty, Whisper returned empty for real audio — report these numbers.",
                 color = Color.Gray,
                 fontSize = 12.sp
             )

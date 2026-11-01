@@ -36,6 +36,13 @@ data class UiState(
     val importedFiles: List<String> = emptyList(),
     val customModelFile: String? = null,
     val cacheEnabled: Boolean = true,
+    // Diagnostics, shown on Dictate so a blank screen is never a mystery:
+    // if frames stay at 0 the mic is not delivering audio; if utterances
+    // rise but text stays empty, Whisper returned empty for real audio.
+    val framesReceived: Long = 0L,
+    val utterancesTranscribed: Int = 0,
+    val lastRms: Float = 0f,
+    val lastRawResult: String? = null,
     val elapsedSeconds: Long = 0L,
     val amplitude: Float = 0f,
     val currentText: String = "",
@@ -357,39 +364,96 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // VAD-utterance state. Not a timer: an utterance starts on sustained
+    // speech (RMS above threshold for 2 frames) and ends after ~2 s of
+    // silence, on manual stop, or at Whisper's 30 s window cap. Only a
+    // completed utterance is sent to Whisper, once, as final text.
+    private val utteranceBuffer = ArrayList<Float>()
+    private var utteranceSpeaking = false
+    private var speechFrames = 0
+    private var silenceFrames = 0
+    private val utteranceLock = Any()
+
+    private fun flushUtterance(eng: WhisperEngine, reason: String) {
+        val pcm: FloatArray
+        synchronized(utteranceLock) {
+            if (utteranceBuffer.size < Recorder.SAMPLE_RATE / 2) {
+                utteranceBuffer.clear()
+                utteranceSpeaking = false
+                speechFrames = 0
+                silenceFrames = 0
+                return
+            }
+            pcm = FloatArray(utteranceBuffer.size) { utteranceBuffer[it] }
+            utteranceBuffer.clear()
+            utteranceSpeaking = false
+            speechFrames = 0
+            silenceFrames = 0
+        }
+        viewModelScope.launch(Dispatchers.Default) {
+            transcribeMutex.withLock {
+                withContext(Dispatchers.Main) {
+                    _state.update { it.copy(statusMessage = "Wrapping up… transcribing your last utterance.") }
+                }
+                val raw = eng.transcribe(pcm)
+                val text = raw.trim()
+                withContext(Dispatchers.Main) {
+                    if (text.isNotBlank()) {
+                        val words = countWords(text).toLong()
+                        val newTotal = _state.value.totalWords + words
+                        _state.update { current ->
+                            val joined = if (current.currentText.isBlank()) text else current.currentText + " " + text
+                            current.copy(
+                                currentText = joined, totalWords = newTotal,
+                                utterancesTranscribed = current.utterancesTranscribed + 1,
+                                lastRawResult = text, statusMessage = null
+                            )
+                        }
+                        viewModelScope.launch { Store.saveTotalWords(context, newTotal) }
+                    } else {
+                        _state.update {
+                            it.copy(
+                                utterancesTranscribed = it.utterancesTranscribed + 1,
+                                lastRawResult = "(empty — Whisper returned no text for this utterance)",
+                                statusMessage = "Heard audio, but no words were recognised in the last utterance ($reason). Try speaking closer to the mic, louder, and in full sentences."
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private fun startRecorderWithEngine(eng: WhisperEngine) {
         viewModelScope.launch(Dispatchers.IO) {
+            synchronized(utteranceLock) {
+                utteranceBuffer.clear()
+                utteranceSpeaking = false
+                speechFrames = 0
+                silenceFrames = 0
+            }
             val rec = Recorder(
                 onAmplitude = { amp ->
                     _state.update { it.copy(amplitude = amp) }
                 },
-                onChunk = { pcm ->
-                    viewModelScope.launch(Dispatchers.Default) {
-                        transcribeMutex.withLock {
-                            withContext(Dispatchers.Main) {
-                                _state.update { it.copy(statusMessage = "Transcribing…") }
-                            }
-                            val text = eng.transcribe(pcm).trim()
-                            if (text.isNotBlank()) {
-                                val words = countWords(text).toLong()
-                                val newTotal = _state.value.totalWords + words
-                                Store.saveTotalWords(context, newTotal)
-                                withContext(Dispatchers.Main) {
-                                    _state.update { current ->
-                                        val joined = if (current.currentText.isBlank()) text else current.currentText + " " + text
-                                        current.copy(currentText = joined, totalWords = newTotal, statusMessage = null)
-                                    }
-                                }
-                            } else {
-                                // Never fail silently: previously a blank
-                                // transcription left the screen unchanged
-                                // with no clue at all. Now the user sees it.
-                                withContext(Dispatchers.Main) {
-                                    _state.update { it.copy(statusMessage = "Heard audio, but no words were recognised in the last chunk. Try speaking closer to the mic, louder, and in full sentences.") }
-                                }
-                            }
+                onFrame = { frame, rms ->
+                    _state.update { it.copy(framesReceived = it.framesReceived + 1, lastRms = rms) }
+                    var toFlush = false
+                    synchronized(utteranceLock) {
+                        if (rms > 0.01f) {
+                            speechFrames += 1
+                            silenceFrames = 0
+                            if (speechFrames >= 2) utteranceSpeaking = true
+                        } else if (utteranceSpeaking) {
+                            silenceFrames += 1
+                            if (silenceFrames >= 20) toFlush = true // ~2 s silence at 100 ms/frame
+                        }
+                        if (utteranceSpeaking) {
+                            utteranceBuffer.addAll(frame.toList())
+                            if (utteranceBuffer.size >= Recorder.SAMPLE_RATE * 30) toFlush = true
                         }
                     }
+                    if (toFlush) flushUtterance(eng, "silence pause")
                 }
             )
             recorder = rec
@@ -412,7 +476,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (_: Exception) {
             }
             withContext(Dispatchers.Main) {
-                _state.update { it.copy(isRecording = true, isLoadingModel = false, statusMessage = "Listening… speak now, text appears every few seconds.", error = null) }
+                _state.update { it.copy(isRecording = true, isLoadingModel = false, statusMessage = "Listening… speak, then pause — your finished text lands after the pause.", error = null) }
             }
             elapsedJob = viewModelScope.launch {
                 var seconds = 0L
@@ -428,6 +492,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun stopRecording() {
         recorder?.stop()
         recorder = null
+        // Manual stop commits whatever utterance was in progress.
+        engine?.let { flushUtterance(it, "manual stop") }
         elapsedJob?.cancel()
         elapsedJob = null
         try {
@@ -436,8 +502,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         // Active caching: by default the loaded model stays in memory so
         // the next dictation starts instantly. Only unload if the user
-        // turned active caching off in Settings.
-        if (!_state.value.cacheEnabled) {
+        // turned active caching off in Settings — and only when no
+        // utterance is pending, otherwise the pending transcription
+        // would run against a freed model and come back empty.
+        val pending = synchronized(utteranceLock) { utteranceBuffer.size }
+        if (!_state.value.cacheEnabled && pending < Recorder.SAMPLE_RATE / 2) {
             engine?.close()
             engine = null
             _state.update { it.copy(isModelLoaded = false) }
