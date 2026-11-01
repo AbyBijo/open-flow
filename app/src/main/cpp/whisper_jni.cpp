@@ -42,7 +42,10 @@ Java_com_abybijo_openflow_whisper_WhisperEngine_nativeTranscribe(
     // keep normal segmentation.
     params.single_segment = (size < 16000 * 10);
     params.suppress_blank = true;
-    params.suppress_non_speech_tokens = true;
+    // NOTE: whisper.cpp v1.7.5 has no suppress_non_speech_tokens member
+    // in whisper_full_params (run #8 failed on exactly that line) — do
+    // not re-add it. suppress_blank + no_speech_thold are the supported
+    // anti-silence settings in this version.
     params.no_speech_thold = 0.6f;
     // Scale the audio context to the utterance length instead of paying
     // the full 30 s encoder cost for every short utterance.
