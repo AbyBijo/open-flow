@@ -6,6 +6,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -106,7 +107,7 @@ fun OpenFlowApp(
                     .padding(20.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(painterResource(R.drawable.ic_openflow_logo), contentDescription = "OpenFlow logo", tint = Color.Unspecified, modifier = Modifier.size(44.dp))
+                    Image(painterResource(R.drawable.openflow_logo), contentDescription = "OpenFlow logo", modifier = Modifier.size(44.dp))
                     Spacer(Modifier.width(10.dp))
                     Text("OpenFlow", fontSize = 34.sp, fontWeight = FontWeight.Bold, letterSpacing = (-1).sp)
                 }
