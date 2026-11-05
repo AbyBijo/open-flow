@@ -95,7 +95,8 @@ fun OpenFlowApp(
     onResumeDownload: () -> Unit = {},
     onImportLocal: () -> Unit = {},
     onUseImported: (String) -> Unit = {},
-    onSetCacheEnabled: (Boolean) -> Unit = {}
+    onSetCacheEnabled: (Boolean) -> Unit = {},
+    onReloadModel: () -> Unit = {}
 ) {
     var tab by remember { mutableStateOf(Tab.DICTATE) }
     MaterialTheme(colorScheme = if (isDark) DarkScheme else LightScheme) {
@@ -180,7 +181,8 @@ fun OpenFlowApp(
                         state = state,
                         onToggleRecording = onToggleRecording,
                         onDeleteCurrent = onDeleteCurrent,
-                        onOpenModels = { tab = Tab.MODELS }
+                        onOpenModels = { tab = Tab.MODELS },
+                        onReloadModel = onReloadModel
                     )
                     Tab.HISTORY -> HistoryScreen(state, onDeleteHistory)
                     Tab.MODELS -> ModelsScreen(state, onSelectModel, onDownload, onCancelDownload, onDeleteModel, onPauseDownload, onResumeDownload, onImportLocal, onUseImported)
@@ -229,7 +231,8 @@ private fun DictateScreen(
     state: UiState,
     onToggleRecording: () -> Unit,
     onDeleteCurrent: () -> Unit,
-    onOpenModels: () -> Unit
+    onOpenModels: () -> Unit,
+    onReloadModel: () -> Unit = {}
 ) {
     val clipboard = LocalClipboardManager.current
     val model = state.selectedModel
@@ -243,13 +246,23 @@ private fun DictateScreen(
                     Text(state.currentModelName, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                     Text(
                         when {
-                            state.isModelLoaded -> "Cached in memory · ready instantly"
+                            state.isModelLoaded -> "Loaded into memory · ready instantly"
                             state.isCurrentModelReady -> "On device · loading into memory…"
                             else -> "Not downloaded yet · ${model.sizeMb} MB"
                         },
                         color = Color.Gray,
                         fontSize = 13.sp
                     )
+                    state.modelLoadDetail?.let { detail ->
+                        Spacer(Modifier.height(4.dp))
+                        Text(detail, color = if (state.isModelLoaded) Blue else Color(0xFF8B0000), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    if (state.isCurrentModelReady && !state.isModelLoaded && !state.isLoadingModel) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(onClick = onReloadModel) {
+                            Text("Reload model into memory")
+                        }
+                    }
                 }
             }
             Spacer(Modifier.height(10.dp))

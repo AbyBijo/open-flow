@@ -31,31 +31,34 @@ Java_com_abybijo_openflow_whisper_WhisperEngine_nativeTranscribe(
     env->GetFloatArrayRegion(pcm, 0, size, samples.data());
 
     whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    params.language = "auto";
+    // Verified against whisper.cpp v1.7.5 whisper.h / whisper.cpp:
+    // the DEFAULT language is "en" and audio_ctx defaults to 0 (use the
+    // model's 1500). The previous code broke both of those defaults and
+    // that is why dictation came back empty on-device:
+    //  - language "auto" forces auto-detection on every short utterance;
+    //    detection can fail or pick the wrong language and return "".
+    //  - audio_ctx scaled down to 256 for short utterances rewrites the
+    //    encoder context the model was trained with (1500) — experimental,
+    //    not a proven pattern, and it changes KV-cache / positional
+    //    handling for every short utterance.
+    // So: keep whisper's defaults, only pin English and set threads.
+    params.language = "en";
+    params.detect_language = false;
     params.translate = false;
     params.print_progress = false;
     params.print_special = false;
     params.print_realtime = false;
     params.print_timestamps = false;
     params.no_context = true;
-    // Short utterances: one segment avoids over-segmentation. Long ones
-    // keep normal segmentation.
-    params.single_segment = (size < 16000 * 10);
     params.suppress_blank = true;
     // NOTE: whisper.cpp v1.7.5 has no suppress_non_speech_tokens member
     // in whisper_full_params (run #8 failed on exactly that line) — do
     // not re-add it. suppress_blank + no_speech_thold are the supported
     // anti-silence settings in this version.
     params.no_speech_thold = 0.6f;
-    // Scale the audio context to the utterance length instead of paying
-    // the full 30 s encoder cost for every short utterance.
-    {
-        int seconds = static_cast<int>(size / 16000) + 1;
-        int ctx = (seconds * 1500) / 30 + 128;
-        if (ctx < 256) ctx = 256;
-        if (ctx > 1500) ctx = 1500;
-        params.audio_ctx = ctx;
-    }
+    // audio_ctx intentionally left at its default (0 = model default
+    // 1500). Do NOT scale it down for short utterances.
+    // single_segment intentionally left at its default (false).
     // Proven Android thread count: min(4, cores). More threads contend
     // with the audio/UI threads and throttle on a phone.
     {

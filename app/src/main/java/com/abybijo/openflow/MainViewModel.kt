@@ -31,6 +31,12 @@ data class UiState(
     val isRecording: Boolean = false,
     val isLoadingModel: Boolean = false,
     val isModelLoaded: Boolean = false,
+    // Verified model-in-memory proof, shown on Dictate: file size on
+    // disk, and what the load actually did (loaded in X s, or the exact
+    // reason it failed). A silent preload that fails is how dictation
+    // silently did nothing in v1.2 — this must never be silent again.
+    val modelFileMb: Double = 0.0,
+    val modelLoadDetail: String? = null,
     val isDownloadPaused: Boolean = false,
     val statusMessage: String? = null,
     val importedFiles: List<String> = emptyList(),
@@ -117,26 +123,84 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         else Store.modelFile(context, _state.value.selectedModel)
     }
 
-    /** Load the current model into memory now, if it is already on disk. */
+    /** Load the current model into memory now, if it is already on disk.
+     *  This is verified, not assumed: the file is checked (exists, size
+     *  vs the catalogue size for known models — a truncated download must
+     *  never be loaded as if it were a real model), the load is timed,
+     *  and success or the exact failure reason is shown on Dictate. */
     fun preloadCurrentModel() {
-        if (!WhisperEngine.isAvailable) return
         val state = _state.value
         if (!state.isCurrentModelReady || state.isModelLoaded || state.isLoadingModel) return
-        _state.update { it.copy(isLoadingModel = true, statusMessage = "Caching ${state.currentModelName} model in memory…") }
+        val file = currentModelFile()
+        val fileMb = if (file.exists()) file.length() / 1_000_000.0 else 0.0
+        _state.update { it.copy(modelFileMb = fileMb, isLoadingModel = true, statusMessage = "Loading ${state.currentModelName} model into memory…") }
+        if (!WhisperEngine.isAvailable) {
+            _state.update {
+                it.copy(
+                    isLoadingModel = false, isModelLoaded = false,
+                    modelLoadDetail = "Native Whisper library did not load in this build — the model cannot be put into memory.",
+                    error = "Whisper engine is not available in this build. The native library failed to load."
+                )
+            }
+            return
+        }
+        if (!file.exists() || file.length() <= 0L) {
+            _state.update {
+                it.copy(
+                    isLoadingModel = false, isModelLoaded = false,
+                    modelLoadDetail = "Model file is missing or empty on disk.",
+                    error = "Model file is missing. Download or import it again in Models."
+                )
+            }
+            return
+        }
+        // Known catalogue model, wrong size = truncated / corrupt file.
+        // Quantised models have no pinned SHA, so size is the check.
+        val expectedMb = state.selectedModel.sizeMb.toDouble()
+        val isKnown = state.customModelFile == null
+        if (isKnown && fileMb < expectedMb * 0.85) {
+            _state.update {
+                it.copy(
+                    isLoadingModel = false, isModelLoaded = false,
+                    modelLoadDetail = "Model file is incomplete: ${"%.1f".format(fileMb)} MB on disk, expected about ${expectedMb.toInt()} MB.",
+                    error = "Model file looks incomplete (${"%.1f".format(fileMb)} MB, expected ${expectedMb.toInt()} MB). Delete it in Models and download it again."
+                )
+            }
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
+            val startedAt = System.currentTimeMillis()
             val eng = engine ?: WhisperEngine().also { engine = it }
-            val loaded = eng.load(currentModelFile())
+            val loaded = try {
+                eng.load(file)
+            } catch (_: OutOfMemoryError) {
+                false
+            } catch (_: Exception) {
+                false
+            }
+            val seconds = (System.currentTimeMillis() - startedAt) / 1000.0
             withContext(Dispatchers.Main) {
                 _state.update {
                     it.copy(
                         isLoadingModel = false,
                         isModelLoaded = loaded,
-                        statusMessage = if (loaded) "Model cached & ready — dictation starts instantly." else null,
-                        error = if (loaded) null else "Could not load the model. Try deleting and re-downloading it."
+                        modelFileMb = fileMb,
+                        modelLoadDetail = if (loaded) "Loaded into memory: ${state.currentModelName} · ${"%.1f".format(fileMb)} MB · ${"%.1f".format(seconds)} s" else "Load failed: ${state.currentModelName} · ${"%.1f".format(fileMb)} MB on disk · native load returned no model (file may be corrupt, or the phone ran out of memory for this model — try Tiny).",
+                        statusMessage = if (loaded) "Model loaded into memory — dictation is ready." else null,
+                        error = if (loaded) null else "Could not load the model into memory. Try Tiny, or delete and re-download this model."
                     )
                 }
             }
         }
+    }
+
+    /** Force the model to be loaded into memory again from disk.
+     *  Used by the "Reload model" button on Dictate. */
+    fun reloadModel() {
+        engine?.close()
+        engine = null
+        _state.update { it.copy(isModelLoaded = false, modelLoadDetail = null, error = null) }
+        preloadCurrentModel()
     }
 
     fun setCacheEnabled(enabled: Boolean) {
@@ -373,11 +437,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var speechFrames = 0
     private var silenceFrames = 0
     private val utteranceLock = Any()
+    // Full-session audio, separate from the VAD utterance buffer: every
+    // frame recorded since the mic started, capped at 30 s. This is the
+    // safety net — if VAD never fires (threshold / silence logic), the
+    // text still lands on manual stop from this buffer instead of
+    // vanishing. sessionTranscribedUpTo marks how much of it a VAD
+    // flush already turned into text, so stop never transcribes the
+    // same speech twice.
+    private val sessionBuffer = ArrayList<Float>()
+    private var sessionTranscribedUpTo = 0
 
     private fun flushUtterance(eng: WhisperEngine, reason: String) {
         val pcm: FloatArray
         synchronized(utteranceLock) {
-            if (utteranceBuffer.size < Recorder.SAMPLE_RATE / 2) {
+            if (utteranceBuffer.size < Recorder.SAMPLE_RATE / 4) {
                 utteranceBuffer.clear()
                 utteranceSpeaking = false
                 speechFrames = 0
@@ -389,7 +462,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             utteranceSpeaking = false
             speechFrames = 0
             silenceFrames = 0
+            // Everything recorded up to now has been handed to Whisper
+            // (or discarded as too short to be speech), so the stop
+            // fallback must not re-transcribe it.
+            sessionTranscribedUpTo = sessionBuffer.size
         }
+        transcribePcm(eng, pcm, reason)
+    }
+
+    /** Transcribe one chunk and append its text (or record the empty
+     *  result visibly). Shared by VAD flushes and the stop fallback. */
+    private fun transcribePcm(eng: WhisperEngine, pcm: FloatArray, reason: String) {
         viewModelScope.launch(Dispatchers.Default) {
             transcribeMutex.withLock {
                 withContext(Dispatchers.Main) {
@@ -431,6 +514,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 utteranceSpeaking = false
                 speechFrames = 0
                 silenceFrames = 0
+                sessionBuffer.clear()
+                sessionTranscribedUpTo = 0
             }
             val rec = Recorder(
                 onAmplitude = { amp ->
@@ -440,6 +525,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _state.update { it.copy(framesReceived = it.framesReceived + 1, lastRms = rms) }
                     var toFlush = false
                     synchronized(utteranceLock) {
+                        // Safety-net buffer: every frame, spoken or not,
+                        // capped at Whisper's 30 s window.
+                        sessionBuffer.addAll(frame.toList())
+                        val cap = Recorder.SAMPLE_RATE * 30
+                        if (sessionBuffer.size > cap) {
+                            val dropped = sessionBuffer.size - cap
+                            sessionBuffer.subList(0, dropped).clear()
+                            sessionTranscribedUpTo = maxOf(0, sessionTranscribedUpTo - dropped)
+                        }
                         if (rms > 0.01f) {
                             speechFrames += 1
                             silenceFrames = 0
@@ -493,7 +587,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         recorder?.stop()
         recorder = null
         // Manual stop commits whatever utterance was in progress.
-        engine?.let { flushUtterance(it, "manual stop") }
+        var transcriptionLaunched = false
+        engine?.let { eng ->
+            val hadUtterance = synchronized(utteranceLock) { utteranceBuffer.size >= Recorder.SAMPLE_RATE / 4 }
+            if (hadUtterance) transcriptionLaunched = true
+            flushUtterance(eng, "manual stop")
+            // Safety net: if VAD never fired, whatever was actually
+            // recorded is still in sessionBuffer — transcribe the part
+            // no VAD flush has covered yet, instead of losing it.
+            val tail: FloatArray? = synchronized(utteranceLock) {
+                val remaining = sessionBuffer.size - sessionTranscribedUpTo
+                if (remaining < Recorder.SAMPLE_RATE / 4) null
+                else FloatArray(remaining) { sessionBuffer[sessionTranscribedUpTo + it] }.also {
+                    sessionTranscribedUpTo = sessionBuffer.size
+                    utteranceBuffer.clear()
+                    utteranceSpeaking = false
+                }
+            }
+            if (tail != null) {
+                transcriptionLaunched = true
+                transcribePcm(eng, tail, "manual stop — full recording")
+            }
+        }
         elapsedJob?.cancel()
         elapsedJob = null
         try {
@@ -505,8 +620,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // turned active caching off in Settings — and only when no
         // utterance is pending, otherwise the pending transcription
         // would run against a freed model and come back empty.
-        val pending = synchronized(utteranceLock) { utteranceBuffer.size }
-        if (!_state.value.cacheEnabled && pending < Recorder.SAMPLE_RATE / 2) {
+        // Do NOT unload here if a transcription was just launched: it
+        // runs async against this same model, and freeing it now would
+        // make it come back empty. The model stays loaded until the
+        // next model change in that case.
+        if (!_state.value.cacheEnabled && !transcriptionLaunched) {
             engine?.close()
             engine = null
             _state.update { it.copy(isModelLoaded = false) }

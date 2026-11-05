@@ -66,7 +66,8 @@ class MainActivity : ComponentActivity() {
                     onResumeDownload = { viewModel.resumeDownload() },
                     onImportLocal = { importModel.launch("*/*") },
                     onUseImported = { viewModel.useImportedFile(it) },
-                    onSetCacheEnabled = { viewModel.setCacheEnabled(it) }
+                    onSetCacheEnabled = { viewModel.setCacheEnabled(it) },
+                    onReloadModel = { viewModel.reloadModel() }
                 )
             }
         }
