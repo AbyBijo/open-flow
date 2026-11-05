@@ -37,6 +37,9 @@ data class UiState(
     // silently did nothing in v1.2 — this must never be silent again.
     val modelFileMb: Double = 0.0,
     val modelLoadDetail: String? = null,
+    val isTranscribing: Boolean = false,
+    val whisperDiag: String? = null,
+    val canRetryLast: Boolean = false,
     val isDownloadPaused: Boolean = false,
     val statusMessage: String? = null,
     val importedFiles: List<String> = emptyList(),
@@ -472,16 +475,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Transcribe one chunk and append its text (or record the empty
      *  result visibly). Shared by VAD flushes and the stop fallback. */
-    private fun transcribePcm(eng: WhisperEngine, pcm: FloatArray, reason: String) {
+    // Last audio chunk, kept so an empty result can be retried with
+    // lenient settings instead of being lost forever.
+    private var lastFailedPcm: FloatArray? = null
+
+    fun retryLastUtterance() {
+        val pcm = lastFailedPcm ?: return
+        val eng = engine ?: return
+        _state.update { it.copy(canRetryLast = false) }
         viewModelScope.launch(Dispatchers.Default) {
             transcribeMutex.withLock {
                 withContext(Dispatchers.Main) {
-                    _state.update { it.copy(statusMessage = "Wrapping up… transcribing your last utterance.") }
+                    _state.update { it.copy(isTranscribing = true, statusMessage = "Retrying with lenient settings…") }
                 }
-                val raw = eng.transcribe(pcm)
+                val raw = eng.transcribeDiag(pcm, lenient = true)
                 val text = raw.trim()
+                val diag = "Whisper: ${eng.lastSegments} segments · no-speech ${"%.2f".format(eng.lastNoSpeechProb)} · ${eng.lastTranscribeMs} ms (lenient retry)"
                 withContext(Dispatchers.Main) {
                     if (text.isNotBlank()) {
+                        lastFailedPcm = null
                         val words = countWords(text).toLong()
                         val newTotal = _state.value.totalWords + words
                         _state.update { current ->
@@ -489,7 +501,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             current.copy(
                                 currentText = joined, totalWords = newTotal,
                                 utterancesTranscribed = current.utterancesTranscribed + 1,
-                                lastRawResult = text, statusMessage = null
+                                lastRawResult = text, statusMessage = null, whisperDiag = diag, isTranscribing = false
                             )
                         }
                         viewModelScope.launch { Store.saveTotalWords(context, newTotal) }
@@ -497,8 +509,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         _state.update {
                             it.copy(
                                 utterancesTranscribed = it.utterancesTranscribed + 1,
+                                lastRawResult = "(empty — Whisper returned no text, even lenient)",
+                                statusMessage = "Whisper still returned no text for that audio. Try the Tiny model, or speak louder and closer to the mic.",
+                                whisperDiag = diag, isTranscribing = false
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun transcribePcm(eng: WhisperEngine, pcm: FloatArray, reason: String) {
+        viewModelScope.launch(Dispatchers.Default) {
+            transcribeMutex.withLock {
+                withContext(Dispatchers.Main) {
+                    _state.update { it.copy(isTranscribing = true, statusMessage = "Transcribing… Whisper is working on your audio now.") }
+                }
+                val raw = eng.transcribe(pcm)
+                val text = raw.trim()
+                val diag = "Whisper: ${eng.lastSegments} segments · no-speech ${"%.2f".format(eng.lastNoSpeechProb)} · ${eng.lastTranscribeMs} ms"
+                withContext(Dispatchers.Main) {
+                    if (text.isNotBlank()) {
+                        lastFailedPcm = null
+                        val words = countWords(text).toLong()
+                        val newTotal = _state.value.totalWords + words
+                        _state.update { current ->
+                            val joined = if (current.currentText.isBlank()) text else current.currentText + " " + text
+                            current.copy(
+                                currentText = joined, totalWords = newTotal,
+                                utterancesTranscribed = current.utterancesTranscribed + 1,
+                                lastRawResult = text, statusMessage = null, whisperDiag = diag, isTranscribing = false, canRetryLast = false
+                            )
+                        }
+                        viewModelScope.launch { Store.saveTotalWords(context, newTotal) }
+                    } else {
+                        lastFailedPcm = pcm
+                        _state.update {
+                            it.copy(
+                                utterancesTranscribed = it.utterancesTranscribed + 1,
                                 lastRawResult = "(empty — Whisper returned no text for this utterance)",
-                                statusMessage = "Heard audio, but no words were recognised in the last utterance ($reason). Try speaking closer to the mic, louder, and in full sentences."
+                                statusMessage = "Heard audio, but Whisper returned no text ($reason). Tap Retry below to try it again with lenient settings.",
+                                whisperDiag = diag, isTranscribing = false, canRetryLast = true
                             )
                         }
                     }

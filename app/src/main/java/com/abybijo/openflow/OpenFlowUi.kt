@@ -96,7 +96,8 @@ fun OpenFlowApp(
     onImportLocal: () -> Unit = {},
     onUseImported: (String) -> Unit = {},
     onSetCacheEnabled: (Boolean) -> Unit = {},
-    onReloadModel: () -> Unit = {}
+    onReloadModel: () -> Unit = {},
+    onRetryLast: () -> Unit = {}
 ) {
     var tab by remember { mutableStateOf(Tab.DICTATE) }
     MaterialTheme(colorScheme = if (isDark) DarkScheme else LightScheme) {
@@ -182,7 +183,8 @@ fun OpenFlowApp(
                         onToggleRecording = onToggleRecording,
                         onDeleteCurrent = onDeleteCurrent,
                         onOpenModels = { tab = Tab.MODELS },
-                        onReloadModel = onReloadModel
+                        onReloadModel = onReloadModel,
+                        onRetryLast = onRetryLast
                     )
                     Tab.HISTORY -> HistoryScreen(state, onDeleteHistory)
                     Tab.MODELS -> ModelsScreen(state, onSelectModel, onDownload, onCancelDownload, onDeleteModel, onPauseDownload, onResumeDownload, onImportLocal, onUseImported)
@@ -232,7 +234,8 @@ private fun DictateScreen(
     onToggleRecording: () -> Unit,
     onDeleteCurrent: () -> Unit,
     onOpenModels: () -> Unit,
-    onReloadModel: () -> Unit = {}
+    onReloadModel: () -> Unit = {},
+    onRetryLast: () -> Unit = {}
 ) {
     val clipboard = LocalClipboardManager.current
     val model = state.selectedModel
@@ -359,6 +362,20 @@ private fun DictateScreen(
                 color = Color.Gray,
                 fontSize = 12.sp
             )
+            state.whisperDiag?.let { diag ->
+                Spacer(Modifier.height(6.dp))
+                Text(diag, color = Blue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
+            if (state.isTranscribing) {
+                Spacer(Modifier.height(6.dp))
+                Text("Transcribing… please wait, Whisper is working on your audio.", color = Blue, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            }
+            if (state.canRetryLast) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = onRetryLast) {
+                    Text("Retry last utterance (lenient)")
+                }
+            }
             Text(
                 "If frames stay at 0, the mic is not delivering audio. If utterances rise but text stays empty, Whisper returned empty for real audio — report these numbers.",
                 color = Color.Gray,

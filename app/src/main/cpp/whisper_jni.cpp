@@ -1,3 +1,4 @@
+#include <chrono>
 #include <jni.h>
 #include <string>
 #include <thread>
@@ -21,12 +22,20 @@ Java_com_abybijo_openflow_whisper_WhisperEngine_nativeInit(
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_abybijo_openflow_whisper_WhisperEngine_nativeTranscribe(
-    JNIEnv* env, jobject /* thiz */, jlong handle, jfloatArray pcm) {
+Java_com_abybijo_openflow_whisper_WhisperEngine_nativeTranscribeDiag(
+    JNIEnv* env, jobject /* thiz */, jlong handle, jfloatArray pcm, jboolean lenient) {
+    auto start = std::chrono::steady_clock::now();
+    auto diag = [&](int segments, float noSpeech, const std::string& text) {
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        std::string out = std::to_string(segments) + "|" +
+            std::to_string(noSpeech) + "|" + std::to_string(ms) + "|" + text;
+        return env->NewStringUTF(out.c_str());
+    };
     auto* ctx = reinterpret_cast<whisper_context*>(handle);
-    if (ctx == nullptr || pcm == nullptr) return env->NewStringUTF("");
+    if (ctx == nullptr || pcm == nullptr) return diag(0, 1.0f, "");
     jsize size = env->GetArrayLength(pcm);
-    if (size <= 0) return env->NewStringUTF("");
+    if (size <= 0) return diag(0, 1.0f, "");
     std::vector<float> samples(static_cast<size_t>(size));
     env->GetFloatArrayRegion(pcm, 0, size, samples.data());
 
@@ -55,7 +64,10 @@ Java_com_abybijo_openflow_whisper_WhisperEngine_nativeTranscribe(
     // in whisper_full_params (run #8 failed on exactly that line) — do
     // not re-add it. suppress_blank + no_speech_thold are the supported
     // anti-silence settings in this version.
-    params.no_speech_thold = 0.6f;
+    // Lenient retry (Retry button): accept much quieter / less certain
+    // speech instead of discarding it as no-speech.
+    params.no_speech_thold = lenient ? 0.2f : 0.6f;
+    if (lenient) params.suppress_blank = false;
     // audio_ctx intentionally left at its default (0 = model default
     // 1500). Do NOT scale it down for short utterances.
     // single_segment intentionally left at its default (false).
@@ -69,18 +81,20 @@ Java_com_abybijo_openflow_whisper_WhisperEngine_nativeTranscribe(
     }
 
     if (whisper_full(ctx, params, samples.data(), static_cast<int>(samples.size())) != 0) {
-        return env->NewStringUTF("");
+        return diag(0, 1.0f, "");
     }
     std::string result;
     const int segments = whisper_full_n_segments(ctx);
+    float noSpeech = 1.0f;
     for (int i = 0; i < segments; i++) {
         const char* text = whisper_full_get_segment_text(ctx, i);
         if (text != nullptr) {
             if (!result.empty()) result += " ";
             result += text;
         }
+        if (i == 0) noSpeech = whisper_full_get_segment_no_speech_prob(ctx, i);
     }
-    return env->NewStringUTF(result.c_str());
+    return diag(segments, noSpeech, result);
 }
 
 JNIEXPORT void JNICALL

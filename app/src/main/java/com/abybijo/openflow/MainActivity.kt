@@ -67,7 +67,8 @@ class MainActivity : ComponentActivity() {
                     onImportLocal = { importModel.launch("*/*") },
                     onUseImported = { viewModel.useImportedFile(it) },
                     onSetCacheEnabled = { viewModel.setCacheEnabled(it) },
-                    onReloadModel = { viewModel.reloadModel() }
+                    onReloadModel = { viewModel.reloadModel() },
+                    onRetryLast = { viewModel.retryLastUtterance() }
                 )
             }
         }
