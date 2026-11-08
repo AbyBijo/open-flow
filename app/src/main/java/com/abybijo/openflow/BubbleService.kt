@@ -29,7 +29,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import java.io.File
 import android.animation.ObjectAnimator
@@ -56,6 +56,9 @@ class BubbleService : Service() {
     private var micIcon: ImageView? = null
     private var waveRow: LinearLayout? = null
     private var bubbleBg: GradientDrawable? = null
+    private var lastX: Int? = null
+    private var lastY: Int? = null
+    private var pendingRebuild = false
 
     private enum class BubbleState { IDLE, RECORDING, TRANSCRIBING }
 
@@ -64,9 +67,19 @@ class BubbleService : Service() {
     override fun onCreate() {
         super.onCreate()
         startForegroundNotification()
+        // Follow preference changes live: size, colour, shape and opacity
+        // from Settings must reach the bubble without restarting the app.
+        // While recording or transcribing, defer the rebuild until idle.
         scope.launch {
-            prefs = Store.prefsFlow(this@BubbleService).first()
-            buildBubble()
+            Store.prefsFlow(this@BubbleService).collect { newPrefs ->
+                val firstBuild = bubbleView == null
+                prefs = newPrefs
+                when {
+                    firstBuild -> buildBubble()
+                    state == BubbleState.IDLE -> rebuildBubble()
+                    else -> pendingRebuild = true
+                }
+            }
         }
     }
 
@@ -155,7 +168,6 @@ class BubbleService : Service() {
             FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER
         ))
 
-        val display = windowManager?.defaultDisplay
         val metrics = resources.displayMetrics
         val widthPx = metrics.widthPixels
         val heightPx = metrics.heightPixels
@@ -171,8 +183,8 @@ class BubbleService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = widthPx - bubbleWidth - dp(14)
-            y = (heightPx * 0.58).toInt()
+            x = lastX ?: (widthPx - bubbleWidth - dp(14))
+            y = lastY ?: (heightPx * 0.58).toInt()
         }
         bubbleView = root
         root.setOnTouchListener(DragTouchListener())
@@ -216,6 +228,8 @@ class BubbleService : Service() {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (dragged) {
+                        lastX = params?.x
+                        lastY = params?.y
                         if (prefs.snapToEdge) snapToEdge()
                     } else if (System.currentTimeMillis() - downTime < 500) {
                         onBubbleTap()
@@ -227,11 +241,29 @@ class BubbleService : Service() {
         }
     }
 
+    /** Remove the current bubble and build it again with the latest prefs,
+     *  keeping the position the user dragged it to. */
+    private fun rebuildBubble() {
+        lastX = params?.x
+        lastY = params?.y
+        stopWaveAnimation()
+        try {
+            bubbleView?.let { windowManager?.removeView(it) }
+        } catch (_: Exception) { }
+        bubbleView = null
+        micIcon = null
+        waveRow = null
+        bubbleBg = null
+        buildBubble()
+    }
+
     private fun snapToEdge() {
         val p = params ?: return
         val widthPx = resources.displayMetrics.widthPixels
         val bubbleWidth = p.width
         p.x = if (p.x + bubbleWidth / 2 < widthPx / 2) dp(10) else widthPx - bubbleWidth - dp(10)
+        lastX = p.x
+        lastY = p.y
         try { windowManager?.updateViewLayout(bubbleView, p) } catch (_: Exception) { }
         haptic()
     }
@@ -359,6 +391,10 @@ class BubbleService : Service() {
         scope.launch(Dispatchers.Main) {
             state = BubbleState.IDLE
             setBubbleAppearance(recording = false, transcribing = false)
+            if (pendingRebuild) {
+                pendingRebuild = false
+                rebuildBubble()
+            }
             if (error != null) {
                 Toast.makeText(this@BubbleService, error, Toast.LENGTH_LONG).show()
                 return@launch

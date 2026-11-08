@@ -1,8 +1,14 @@
 package com.abybijo.openflow
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
@@ -27,14 +33,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -53,7 +56,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -112,8 +114,6 @@ fun OpenFlowTheme(isDark: Boolean, content: @Composable () -> Unit) {
     )
 }
 
-private fun muted(isDark: Boolean) = if (isDark) Color(0xFF9A9AB5) else Color(0xFF6B6B85)
-
 // ---------- Shared components ----------
 
 @Composable
@@ -170,7 +170,6 @@ fun GradientButton(
 fun GhostButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, iconRes: Int? = null) {
     Box(
         modifier = modifier
-            .fillMaxWidth()
             .height(56.dp)
             .clip(RoundedCornerShape(18.dp))
             .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(18.dp))
@@ -229,7 +228,7 @@ fun IconTile(iconRes: Int, size: Dp = 40.dp) {
 fun SectionLabel(text: String) {
     Text(
         text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-        color = muted(false), letterSpacing = 0.4.sp,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), letterSpacing = 0.4.sp,
         modifier = Modifier.padding(start = 6.dp, top = 16.dp, bottom = 4.dp)
     )
 }
@@ -283,6 +282,7 @@ fun greeting(): String {
 fun OpenFlowApp(
     vm: MainViewModel,
     prefs: Prefs,
+    prefsReady: Boolean,
     isDark: Boolean,
     micGranted: Boolean,
     overlayGranted: Boolean,
@@ -290,6 +290,7 @@ fun OpenFlowApp(
     onRequestMic: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onOpenA11ySettings: () -> Unit,
+    onOpenAppInfo: () -> Unit,
     onRefreshPermissions: () -> Unit,
     onStartBubble: () -> Unit,
     onStopBubble: () -> Unit,
@@ -304,6 +305,14 @@ fun OpenFlowApp(
     }
     OpenFlowTheme(isDark = isDark) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            // Until the stored preferences have actually loaded, show a
+            // branded splash. Without this the first frame uses the default
+            // prefs (onboarding not done) and flashes onboarding before
+            // jumping to Home.
+            if (!prefsReady) {
+                SplashScreen()
+                return@Surface
+            }
             when (val r = route) {
                 is Route.Onboarding -> OnboardingScreen(
                     step = r.step,
@@ -314,6 +323,7 @@ fun OpenFlowApp(
                     onRequestMic = onRequestMic,
                     onOpenOverlaySettings = onOpenOverlaySettings,
                     onOpenA11ySettings = onOpenA11ySettings,
+                    onOpenAppInfo = onOpenAppInfo,
                     onRefreshPermissions = onRefreshPermissions,
                     onOpenUrl = onOpenUrl,
                     onStep = { route = Route.Onboarding(it) },
@@ -363,6 +373,34 @@ sealed class Route {
     object ChangeKey : Route()
 }
 
+/** Branded launch splash: logo and name only, shown while stored prefs load. */
+@Composable
+fun SplashScreen() {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Image(
+            painter = painterResource(R.drawable.openflow_logo),
+            contentDescription = "OpenFlow logo",
+            modifier = Modifier.size(92.dp).clip(RoundedCornerShape(22.dp)),
+            contentScale = ContentScale.Crop
+        )
+        Text(
+            "OpenFlow",
+            fontSize = 28.sp, fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(top = 20.dp)
+        )
+        Text(
+            "Speak freely.",
+            fontSize = 15.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(top = 6.dp)
+        )
+    }
+}
+
 // ---------- Onboarding ----------
 
 @Composable
@@ -375,6 +413,7 @@ fun OnboardingScreen(
     onRequestMic: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onOpenA11ySettings: () -> Unit,
+    onOpenAppInfo: () -> Unit,
     onRefreshPermissions: () -> Unit,
     onOpenUrl: (String) -> Unit,
     onStep: (Int) -> Unit,
@@ -399,6 +438,7 @@ fun OnboardingScreen(
                 onRequestMic = onRequestMic,
                 onOpenOverlaySettings = onOpenOverlaySettings,
                 onOpenA11ySettings = onOpenA11ySettings,
+                onOpenAppInfo = onOpenAppInfo,
                 onFinish = onFinish
             )
         }
@@ -483,7 +523,7 @@ fun GetKeyStep(onStep: (Int) -> Unit, onOpenUrl: (String) -> Unit) {
         }
         AnimItem(4) {
             Spacer(Modifier.height(8.dp))
-            GhostButton(text = "Open Groq Console", onClick = { onOpenUrl("https://console.groq.com/keys") }, iconRes = R.drawable.ic_external)
+            GhostButton(text = "Open Groq Console", onClick = { onOpenUrl("https://console.groq.com/keys") }, modifier = Modifier.fillMaxWidth(), iconRes = R.drawable.ic_external)
         }
         Spacer(Modifier.weight(1f))
         AnimItem(5) {
@@ -673,7 +713,7 @@ fun KeyScreen(vm: MainViewModel, isChange: Boolean, onDone: () -> Unit, onBack: 
         if (isChange) {
             Spacer(Modifier.height(8.dp))
             AnimItem(6) {
-                GhostButton(text = "Back to Settings", onClick = onBack)
+                GhostButton(text = "Back to Settings", onClick = onBack, modifier = Modifier.fillMaxWidth())
             }
         }
         Spacer(Modifier.height(8.dp))
@@ -688,6 +728,7 @@ fun PermissionsStep(
     onRequestMic: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onOpenA11ySettings: () -> Unit,
+    onOpenAppInfo: () -> Unit,
     onFinish: () -> Unit
 ) {
     Column {
@@ -728,6 +769,24 @@ fun PermissionsStep(
                             color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
                             modifier = Modifier.clickable { onOpenA11ySettings() }
                         )
+                        if (!a11yGranted) {
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                "If Android shows “Controlled by restricted setting” for OpenFlow, it is because the app was installed directly (not from the Play Store). Fix it in one minute:",
+                                fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "1. Open App info below.\n2. Tap the ⋮ menu at the top right.\n3. Tap “Allow restricted settings”.\n4. Come back and open Accessibility Settings.",
+                                fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Open App info",
+                                color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                                modifier = Modifier.clickable { onOpenAppInfo() }
+                            )
+                        }
                     }
                 }
             }
@@ -967,13 +1026,21 @@ fun SettingsContent(
         AnimItem(1) { SectionLabel("Flow bubble") }
         AnimItem(2) {
             AppCard {
-                // Live preview, matching the HTML preview area.
+                // Live preview, matching the HTML preview area. The whole
+                // preview is tappable — it plays the recording animation.
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(130.dp)
                         .clip(RoundedCornerShape(20.dp))
-                        .background(MaterialTheme.colorScheme.background),
+                        .background(MaterialTheme.colorScheme.background)
+                        .clickable {
+                            previewRecording = true
+                            scope.launch {
+                                delay(2200)
+                                previewRecording = false
+                            }
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     BubblePreview(prefs = prefs, recording = previewRecording)
@@ -982,30 +1049,28 @@ fun SettingsContent(
                     "Tap to preview", fontSize = 14.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
                     textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
-                        .clickable {
-                            previewRecording = true
-                            scope.launch {
-                                delay(2200)
-                                previewRecording = false
-                            }
-                        }
                 )
-                Spacer(Modifier.height(8.dp))
-                SliderRow(label = "Size", valueText = "${prefs.bubbleSize}") {
-                    Slider(
-                        value = prefs.bubbleSize.toFloat(), onValueChange = { vm.setBubbleSize(it.toInt()) },
-                        valueRange = 44f..84f, steps = 39,
-                        colors = SliderDefaults.colors(thumbColor = Accent, activeTrackColor = Accent)
-                    )
-                }
-                SliderRow(label = "Opacity", valueText = "${prefs.bubbleOpacity}%") {
-                    Slider(
-                        value = prefs.bubbleOpacity.toFloat(), onValueChange = { vm.setBubbleOpacity(it.toInt()) },
-                        valueRange = 40f..100f, steps = 59,
-                        colors = SliderDefaults.colors(thumbColor = Accent, activeTrackColor = Accent)
-                    )
-                }
-                Text("Color", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
+                Spacer(Modifier.height(12.dp))
+                // Bubble size: named presets, not a slider.
+                Text("Size", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Spacer(Modifier.height(6.dp))
+                SegmentedControl(
+                    options = BUBBLE_SIZE_NAMES,
+                    selected = nearestPresetIndex(prefs.bubbleSize, BUBBLE_SIZE_PRESETS),
+                    onSelect = { vm.setBubbleSize(BUBBLE_SIZE_PRESETS[it]) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(12.dp))
+                // Opacity: named presets, not a slider.
+                Text("Opacity", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Spacer(Modifier.height(6.dp))
+                SegmentedControl(
+                    options = BUBBLE_OPACITY_NAMES,
+                    selected = nearestPresetIndex(prefs.bubbleOpacity, BUBBLE_OPACITY_PRESETS),
+                    onSelect = { vm.setBubbleOpacity(BUBBLE_OPACITY_PRESETS[it]) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text("Color", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.padding(vertical = 6.dp)) {
                     BUBBLE_COLORS.forEachIndexed { i, colors ->
                         Box(
@@ -1022,15 +1087,14 @@ fun SettingsContent(
                         )
                     }
                 }
-                SettingRow(
-                    title = "Shape",
-                    content = {
-                        SegmentedControl(
-                            options = listOf("Circle", "Pill"),
-                            selected = if (prefs.bubbleShape == "pill") 1 else 0,
-                            onSelect = { vm.setBubbleShape(if (it == 1) "pill" else "circle") }
-                        )
-                    }
+                // Shape: label above the control, so the label can never be
+                // squeezed into a vertical sliver by the segmented control.
+                Text("Shape", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp, bottom = 6.dp))
+                SegmentedControl(
+                    options = listOf("Circle", "Pill"),
+                    selected = if (prefs.bubbleShape == "pill") 1 else 0,
+                    onSelect = { vm.setBubbleShape(if (it == 1) "pill" else "circle") },
+                    modifier = Modifier.fillMaxWidth()
                 )
                 SettingRow(
                     title = "Snap to screen edge", subtitle = "Settles against the nearest side",
@@ -1089,8 +1153,39 @@ fun SettingsContent(
                 )
             }
         }
-        AnimItem(6) { SectionLabel("Appearance") }
-        AnimItem(7) {
+        AnimItem(6) {
+            AppCard {
+                Text("Accessibility", fontWeight = FontWeight.Bold)
+                Text(
+                    "This is what lets dictated text land at the cursor in other apps. If Android shows “Controlled by restricted setting” for OpenFlow, open App info, tap the ⋮ menu, tap “Allow restricted settings”, then enable OpenFlow in Accessibility Settings.",
+                    fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Open App info",
+                    color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                    modifier = Modifier.clickable {
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.parse("package:${context.packageName}")
+                            )
+                        )
+                    }
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Open Accessibility Settings",
+                    color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                    modifier = Modifier.clickable {
+                        context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                    }
+                )
+            }
+        }
+        AnimItem(7) { SectionLabel("Appearance") }
+        AnimItem(8) {
             AppCard {
                 Text("Theme", fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
@@ -1109,7 +1204,7 @@ fun SettingsContent(
                 )
             }
         }
-        AnimItem(8) {
+        AnimItem(9) {
             AppCard(onClick = onAbout) {
                 Text("About OpenFlow", fontWeight = FontWeight.Bold)
                 Text(
@@ -1120,15 +1215,6 @@ fun SettingsContent(
         }
         Spacer(Modifier.height(16.dp))
     }
-}
-
-@Composable
-fun SliderRow(label: String, valueText: String, content: @Composable () -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-        Text(valueText, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
-    }
-    content()
 }
 
 @Composable
@@ -1145,6 +1231,11 @@ fun SettingRow(title: String, subtitle: String? = null, content: @Composable () 
         }
         content()
     }
+}
+
+/** Index of the preset closest to a stored value (older builds saved raw slider values). */
+private fun nearestPresetIndex(value: Int, presets: List<Int>): Int {
+    return presets.indices.minByOrNull { kotlin.math.abs(presets[it] - value) } ?: 1
 }
 
 @Composable
@@ -1166,7 +1257,7 @@ fun SegmentedControl(options: List<String>, selected: Int, onSelect: (Int) -> Un
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    label, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                    label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                     color = if (i == selected) MaterialTheme.colorScheme.onSurface
                     else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
@@ -1191,12 +1282,24 @@ fun BubblePreview(prefs: Prefs, recording: Boolean) {
         contentAlignment = Alignment.Center
     ) {
         if (recording && prefs.showWaveform) {
+            // Animated waveform: each bar breathes on its own phase, so the
+            // recording state is visibly alive — never a static picture.
+            val transition = rememberInfiniteTransition(label = "waveform")
             Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
-                listOf(6, 14, 24, 12, 18).forEach { h ->
+                listOf(6, 14, 24, 12, 18).forEachIndexed { i, h ->
+                    val scale by transition.animateFloat(
+                        initialValue = 0.45f,
+                        targetValue = 1.6f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(durationMillis = 620, delayMillis = i * 110),
+                            repeatMode = RepeatMode.Reverse
+                        ),
+                        label = "waveBar$i"
+                    )
                     Box(
                         modifier = Modifier
                             .width(4.dp)
-                            .height(h.dp)
+                            .height((h * scale).dp)
                             .clip(RoundedCornerShape(2.dp))
                             .background(Color.White)
                     )
@@ -1221,7 +1324,6 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
     var fieldText by remember { mutableStateOf("") }
     var fieldHint by remember { mutableStateOf("Type a message") }
     var bubbleState by remember { mutableStateOf(0) } // 0 idle, 1 recording, 2 transcribing
-    var bubbleX by remember { mutableStateOf(0.72f) }
     val scope = rememberCoroutineScope()
     val recorder = remember { WavRecorder() }
     var recordingFile by remember { mutableStateOf<File?>(null) }
@@ -1260,17 +1362,13 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
         }
         AnimItem(2) {
             // The in-app floating bubble, draggable horizontally like the real one.
-            Box(modifier = Modifier.fillMaxWidth().height(72.dp), contentAlignment = Alignment.CenterEnd) {
-                BubblePreview(
-                    prefs = prefs,
-                    recording = bubbleState == 1 || bubbleState == 2
-                )
-                // Tap area over the preview.
+            // The tap target IS the bubble itself: it wraps the preview, so
+            // the whole pill — including the wide recording state — is
+            // tappable. A fixed 72 dp box used to miss most of the pill.
+            Box(modifier = Modifier.fillMaxWidth().height(96.dp), contentAlignment = Alignment.CenterEnd) {
                 Box(
-                    modifier = Modifier
-                        .size(72.dp)
-                        .clickable {
-                            when (bubbleState) {
+                    modifier = Modifier.clickable {
+                        when (bubbleState) {
                                 0 -> {
                                     if (!micGranted) {
                                         onRequestMic()
@@ -1328,9 +1426,14 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
                                 else -> { /* ignore taps while transcribing */ }
                             }
                         }
-                )
+                    ) {
+                        BubblePreview(
+                            prefs = prefs,
+                            recording = bubbleState == 1 || bubbleState == 2
+                        )
+                    }
+                }
             }
-        }
         AnimItem(3) {
             Surface(
                 shape = RoundedCornerShape(28.dp),
@@ -1374,7 +1477,7 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
                     contentScale = ContentScale.Crop
                 )
                 Text("About OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp))
-                Text("Version 2.0.0", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                Text("Version 2.0.1", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
             }
         }
         AnimItem(2) {

@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
@@ -20,9 +21,22 @@ val BUBBLE_COLORS = listOf(
     BubbleColors(0xFF334155, 0xFF0F172A)
 )
 
+/** Bubble size presets (dp): Small / Medium / Large / Extra Large. No sliders. */
+val BUBBLE_SIZE_PRESETS = listOf(48, 58, 68, 80)
+val BUBBLE_SIZE_NAMES = listOf("Small", "Medium", "Large", "Extra Large")
+
+/** Bubble opacity presets (%): Subtle / Balanced / Solid. No sliders. */
+val BUBBLE_OPACITY_PRESETS = listOf(60, 80, 100)
+val BUBBLE_OPACITY_NAMES = listOf("Subtle", "Balanced", "Solid")
+
 class MainViewModel(private val context: Context) : ViewModel() {
     val prefs: StateFlow<Prefs> = Store.prefsFlow(context)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), Prefs())
+
+    /** True once the stored preferences have actually loaded (first DataStore emission). */
+    val prefsReady: StateFlow<Boolean> = Store.prefsFlow(context)
+        .map { true }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     val hasKey = MutableStateFlow(KeyStore.hasGroqKey(context))
 
