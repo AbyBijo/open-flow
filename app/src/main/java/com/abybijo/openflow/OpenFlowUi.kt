@@ -401,7 +401,8 @@ fun OpenFlowApp(
                     onStopBubble = onStopBubble,
                     onToast = onToast,
                     a11yGranted = a11yGranted,
-                    onOpenA11ySettings = onOpenA11ySettings
+                    onOpenA11ySettings = onOpenA11ySettings,
+                    onOpenAppInfo = onOpenAppInfo
                 )
                 Route.Settings -> MainScreen(
                     vm = vm, prefs = prefs, tab = 1,
@@ -413,6 +414,7 @@ fun OpenFlowApp(
                     onToast = onToast,
                     a11yGranted = a11yGranted,
                     onOpenA11ySettings = onOpenA11ySettings,
+                    onOpenAppInfo = onOpenAppInfo,
                     onAbout = { route = Route.About },
                     onChangeKey = { route = Route.ChangeKey }
                 )
@@ -952,6 +954,7 @@ fun MainScreen(
     onToast: (String) -> Unit,
     a11yGranted: Boolean = true,
     onOpenA11ySettings: () -> Unit = {},
+    onOpenAppInfo: () -> Unit = {},
     onAbout: () -> Unit = {},
     onChangeKey: () -> Unit = {}
 ) {
@@ -959,7 +962,7 @@ fun MainScreen(
     Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
         Box(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(22.dp)) {
             if (tab == 0) {
-                HomeContent(vm, prefs, onDemo, onCopyText, onStartBubble, onStopBubble, onToast, a11yGranted, onOpenA11ySettings)
+                HomeContent(vm, prefs, onDemo, onCopyText, onStartBubble, onStopBubble, onToast, a11yGranted, onOpenA11ySettings, onOpenAppInfo)
             } else {
                 SettingsContent(vm, prefs, context, onAbout, onChangeKey)
             }
@@ -1024,7 +1027,8 @@ fun HomeContent(
     onStopBubble: () -> Unit,
     onToast: (String) -> Unit,
     a11yGranted: Boolean,
-    onOpenA11ySettings: () -> Unit
+    onOpenA11ySettings: () -> Unit,
+    onOpenAppInfo: () -> Unit
 ) {
     Column {
         AnimItem(0) {
@@ -1048,10 +1052,12 @@ fun HomeContent(
                 AppCard {
                     Text("Paste at cursor is off", fontWeight = FontWeight.Bold)
                     Text(
-                        "Paste at cursor is off — turn on OpenFlow in Accessibility settings to paste directly into text fields. Until then dictation copies to the clipboard.",
+                        "Dictation copies to the clipboard until OpenFlow is switched on in Accessibility. Because the app was installed directly (not from the Play Store), Android first blocks that switch — allow it in App info, then switch OpenFlow on:\n\n1. Open App info below.\n2. Tap the ⋮ menu at the top right.\n3. Tap “Allow restricted settings”.\n4. Come back and open Accessibility Settings.",
                         fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
                         modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
                     )
+                    GradientButton(text = "Open App info", onClick = onOpenAppInfo)
+                    Spacer(Modifier.height(8.dp))
                     GhostButton(text = "Open Accessibility Settings", onClick = onOpenA11ySettings, modifier = Modifier.fillMaxWidth())
                 }
             }
@@ -1093,7 +1099,10 @@ fun HomeContent(
                     Spacer(Modifier.width(18.dp))
                     Column {
                         Text("Free usage today", fontWeight = FontWeight.Bold)
-                        Text("$minutes min of 8 hours", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                        Text(
+                            if (prefs.usageSeconds < 60) "${prefs.usageSeconds} sec of 8 hours" else "$minutes min of 8 hours",
+                            fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                        )
                     }
                 }
             }
@@ -1607,7 +1616,7 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
                     contentScale = ContentScale.Crop
                 )
                 Text("About OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp))
-                Text("Version 2.0.3", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                Text("Version 2.0.4", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
             }
         }
         AnimItem(2) {
