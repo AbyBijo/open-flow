@@ -23,6 +23,7 @@ data class RecentEntry(val timestamp: Long, val text: String)
 
 data class Prefs(
     val onboardingDone: Boolean = false,
+    val onboardingStep: Int = 0,
     val theme: String = "system", // system | light | dark
     val bubbleEnabled: Boolean = true,
     val bubbleSize: Int = 58,
@@ -40,6 +41,7 @@ data class Prefs(
 
 object Store {
     private val ONBOARDING_DONE = booleanPreferencesKey("onboarding_done")
+    private val ONBOARDING_STEP = intPreferencesKey("onboarding_step")
     private val THEME = stringPreferencesKey("theme")
     private val BUBBLE_ENABLED = booleanPreferencesKey("bubble_enabled")
     private val BUBBLE_SIZE = intPreferencesKey("bubble_size")
@@ -63,6 +65,7 @@ object Store {
         val usageSeconds = if (storedDate == today) (p[USAGE_SECONDS] ?: 0) else 0
         Prefs(
             onboardingDone = p[ONBOARDING_DONE] ?: false,
+            onboardingStep = (p[ONBOARDING_STEP] ?: 0).coerceIn(0, 4),
             theme = p[THEME] ?: "system",
             bubbleEnabled = p[BUBBLE_ENABLED] ?: true,
             bubbleSize = (p[BUBBLE_SIZE] ?: 58).coerceIn(44, 84),
@@ -104,6 +107,11 @@ object Store {
 
     suspend fun setOnboardingDone(context: Context) {
         context.dataStore.edit { it[ONBOARDING_DONE] = true }
+    }
+
+    /** Persist the current onboarding step so a killed process resumes there. */
+    suspend fun setOnboardingStep(context: Context, step: Int) {
+        context.dataStore.edit { it[ONBOARDING_STEP] = step.coerceIn(0, 4) }
     }
 
     suspend fun setTheme(context: Context, theme: String) {

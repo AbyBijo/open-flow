@@ -57,6 +57,8 @@ class MainViewModel(private val context: Context) : ViewModel() {
 
     fun completeOnboarding() = viewModelScope.launch { Store.setOnboardingDone(context) }
 
+    fun setOnboardingStep(step: Int) = viewModelScope.launch { Store.setOnboardingStep(context, step) }
+
     fun saveKey(key: String) {
         KeyStore.saveGroqKey(context, key)
         hasKey.value = true

@@ -9,4 +9,17 @@
     <style name="Theme.OpenFlow" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:windowLightStatusBar">true</item>
     </style>
+
+    <!--
+      Android 12 splash screen: the system draws this from the first frame,
+      so the app never flashes a blank window on cold start. The splash
+      icon is the launcher icon; after installSplashScreen() the activity
+      switches to the normal theme.
+    -->
+    <style name="Theme.OpenFlow.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="windowSplashScreenAnimationDuration">800</item>
+        <item name="postSplashScreenTheme">@style/Theme.OpenFlow</item>
+    </style>
 </resources>

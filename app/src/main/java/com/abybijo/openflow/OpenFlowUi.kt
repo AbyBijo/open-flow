@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -15,7 +16,11 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -55,12 +60,15 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -240,6 +248,32 @@ fun AppCard(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, conten
     }
 }
 
+/**
+ * A history tile: AppCard with a stronger edge, so each tile reads as its
+ * own card sitting below the last one. In dark mode AppCard's outline is
+ * too close to the background and the tiles blur into one stack.
+ */
+@Composable
+fun HistoryTile(entry: RecentEntry, onClick: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f)),
+        onClick = onClick
+    ) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Text(entry.text, fontSize = 16.sp)
+            Text(
+                formatRecentTime(entry.timestamp),
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+    }
+}
+
 @Composable
 fun IconTile(iconRes: Int, size: Dp = 40.dp) {
     Box(
@@ -346,7 +380,34 @@ fun OpenFlowApp(
     onCopyText: (String) -> Unit,
     onToast: (String) -> Unit
 ) {
-    var route by remember { mutableStateOf<Route>(if (prefs.onboardingDone) Route.Home else Route.Onboarding(0)) }
+    // The current screen survives rotation AND process death: rememberSaveable
+    // restores it when the activity is recreated, and the onboarding step is
+    // also persisted to DataStore for the cases where saved state is gone
+    // (e.g. the process was killed while the user was in Settings).
+    var route by rememberSaveable(saver = routeStateSaver) {
+        mutableStateOf(if (prefs.onboardingDone) Route.Home else Route.Onboarding(prefs.onboardingStep.coerceIn(0, 4)))
+    }
+    // Every onboarding step change is written to DataStore as well as the
+    // navigation state, so the step survives even without saved state.
+    val goToStep: (Int) -> Unit = { step ->
+        route = Route.Onboarding(step)
+        vm.setOnboardingStep(step)
+    }
+    // If saved instance state is gone (fresh launch after the process was
+    // killed), fall back to the onboarding step stored in DataStore.
+    var routeRestored by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(prefsReady) {
+        if (prefsReady && !routeRestored) {
+            routeRestored = true
+            if (!prefs.onboardingDone) {
+                val savedStep = prefs.onboardingStep.coerceIn(0, 4)
+                val current = route
+                if (current is Route.Onboarding && current.step == 0 && savedStep != 0) {
+                    route = Route.Onboarding(savedStep)
+                }
+            }
+        }
+    }
     // Once onboarding completes, move to Home.
     LaunchedEffect(prefs.onboardingDone) {
         if (prefs.onboardingDone && route is Route.Onboarding) route = Route.Home
@@ -355,7 +416,7 @@ fun OpenFlowApp(
     // their parent screen, Settings to Home. Home keeps the default
     // behaviour (exits the app).
     val backAction: (() -> Unit)? = when (val r = route) {
-        is Route.Onboarding -> if (r.step > 0) ({ route = Route.Onboarding(r.step - 1) }) else null
+        is Route.Onboarding -> if (r.step > 0) ({ goToStep(r.step - 1) }) else null
         Route.Demo -> ({ route = Route.Home })
         Route.About -> ({ route = Route.Settings })
         Route.ChangeKey -> ({ route = Route.Settings })
@@ -373,7 +434,24 @@ fun OpenFlowApp(
                 SplashScreen()
                 return@Surface
             }
-            when (val r = route) {
+            // Screens move with a direction-aware slide + fade. Forward
+            // navigation slides the new screen in from the right; going
+            // back slides it in from the left.
+            AnimatedContent(
+                targetState = route,
+                transitionSpec = {
+                    val forward = routeDepth(targetState) > routeDepth(initialState)
+                    if (forward) {
+                        (slideInHorizontally(animationSpec = tween(280)) { it } + fadeIn(tween(280))) togetherWith
+                            (slideOutHorizontally(animationSpec = tween(280)) { -it } + fadeOut(tween(280)))
+                    } else {
+                        (slideInHorizontally(animationSpec = tween(280)) { -it } + fadeIn(tween(280))) togetherWith
+                            (slideOutHorizontally(animationSpec = tween(280)) { it } + fadeOut(tween(280)))
+                    }
+                },
+                label = "route"
+            ) { r ->
+            when (r) {
                 is Route.Onboarding -> OnboardingScreen(
                     step = r.step,
                     vm = vm,
@@ -386,9 +464,10 @@ fun OpenFlowApp(
                     onOpenAppInfo = onOpenAppInfo,
                     onRefreshPermissions = onRefreshPermissions,
                     onOpenUrl = onOpenUrl,
-                    onStep = { route = Route.Onboarding(it) },
+                    onStep = goToStep,
                     onFinish = {
                         vm.completeOnboarding()
+                        vm.setOnboardingStep(0)
                         route = Route.Home
                     }
                 )
@@ -435,6 +514,7 @@ fun OpenFlowApp(
                     )
                 }
             }
+            }
         }
     }
 }
@@ -446,6 +526,40 @@ sealed class Route {
     object Demo : Route()
     object About : Route()
     object ChangeKey : Route()
+}
+
+/** Encode a Route as a single string so it can live in saved instance state. */
+private fun encodeRoute(route: Route): String = when (route) {
+    is Route.Onboarding -> "onboarding:${route.step}"
+    Route.Home -> "home"
+    Route.Settings -> "settings"
+    Route.Demo -> "demo"
+    Route.About -> "about"
+    Route.ChangeKey -> "changekey"
+}
+
+private fun decodeRoute(encoded: String): Route = when {
+    encoded.startsWith("onboarding:") ->
+        Route.Onboarding(encoded.removePrefix("onboarding:").toIntOrNull()?.coerceIn(0, 4) ?: 0)
+    encoded == "settings" -> Route.Settings
+    encoded == "demo" -> Route.Demo
+    encoded == "about" -> Route.About
+    encoded == "changekey" -> Route.ChangeKey
+    else -> Route.Home
+}
+
+/** Saver for the navigation state, so rotation and process death keep the screen. */
+private val routeStateSaver: Saver<MutableState<Route>, String> = Saver(
+    save = { state -> encodeRoute(state.value) },
+    restore = { encoded -> mutableStateOf(decodeRoute(encoded)) }
+)
+
+/** Deeper in the app = higher number. Used to pick the slide direction. */
+private fun routeDepth(route: Route): Int = when (route) {
+    is Route.Onboarding -> route.step
+    Route.Home -> 5
+    Route.Settings -> 6
+    Route.Demo, Route.About, Route.ChangeKey -> 7
 }
 
 /** Branded launch splash: logo and name only, shown while stored prefs load. */
@@ -617,7 +731,7 @@ fun GetKeyStep(onStep: (Int) -> Unit, onOpenUrl: (String) -> Unit) {
 
 @Composable
 fun ConsentStep(onStep: (Int) -> Unit) {
-    var checked by remember { mutableStateOf(false) }
+    var checked by rememberSaveable { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             AnimItem(0) { ProgressDots(current = 3) }
@@ -691,13 +805,15 @@ fun ConsentStep(onStep: (Int) -> Unit) {
 
 @Composable
 fun KeyScreen(vm: MainViewModel, isChange: Boolean, onDone: () -> Unit, onBack: () -> Unit) {
-    var key by remember { mutableStateOf("") }
-    var message by remember { mutableStateOf("") }
-    var messageOk by remember { mutableStateOf(false) }
-    var verifying by remember { mutableStateOf(false) }
-    var verified by remember { mutableStateOf(false) }
-    var shakeTrigger by remember { mutableIntStateOf(0) }
-    var showKey by remember { mutableStateOf(false) }
+    // The pasted key and the verify state survive rotation, so a recreated
+    // activity never wipes what the user just pasted.
+    var key by rememberSaveable { mutableStateOf("") }
+    var message by rememberSaveable { mutableStateOf("") }
+    var messageOk by rememberSaveable { mutableStateOf(false) }
+    var verifying by rememberSaveable { mutableStateOf(false) }
+    var verified by rememberSaveable { mutableStateOf(false) }
+    var shakeTrigger by rememberSaveable { mutableIntStateOf(0) }
+    var showKey by rememberSaveable { mutableStateOf(false) }
     val shake = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -1128,22 +1244,21 @@ fun HomeContent(
                     fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
                     modifier = Modifier.padding(horizontal = 6.dp)
                 )
-            } else {
-                prefs.recent.forEach { entry ->
-                    AppCard(onClick = { onCopyText(entry.text) }) {
-                        Text(entry.text, fontSize = 16.sp)
-                        Text(
-                            formatRecentTime(entry.timestamp),
-                            fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
-                    }
-                    Spacer(Modifier.height(6.dp))
-                }
             }
         }
-        Spacer(Modifier.height(16.dp))
+        if (prefs.recent.isNotEmpty()) {
+            // Each tile animates in on its own, one after another, so the
+            // list reads as tiles stacked below each other — never as one
+            // block sliding in from behind. The stagger is capped so a
+            // long list does not keep late tiles waiting for seconds.
+            prefs.recent.forEachIndexed { index, entry ->
+                AnimItem(7 + minOf(index, 12)) {
+                    HistoryTile(entry = entry, onClick = { onCopyText(entry.text) })
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+        Spacer(Modifier.height(32.dp))
     }
 }
 
@@ -1616,7 +1731,7 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
                     contentScale = ContentScale.Crop
                 )
                 Text("About OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp))
-                Text("Version 2.0.5", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                Text("Version 2.1.0", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
             }
         }
         AnimItem(2) {

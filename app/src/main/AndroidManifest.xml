@@ -11,6 +11,7 @@
 
     <application
         android:allowBackup="true"
+        android:enableOnBackInvokedCallback="true"
         android:icon="@mipmap/ic_launcher"
         android:label="OpenFlow"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -35,7 +36,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:theme="@style/Theme.OpenFlow">
+            android:theme="@style/Theme.OpenFlow.Splash">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

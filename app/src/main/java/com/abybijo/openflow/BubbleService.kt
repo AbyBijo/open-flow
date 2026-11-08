@@ -69,15 +69,28 @@ class BubbleService : Service() {
         startForegroundNotification()
         // Follow preference changes live: size, colour, shape and opacity
         // from Settings must reach the bubble without restarting the app.
-        // While recording or transcribing, defer the rebuild until idle.
+        // Only appearance changes rebuild the overlay — usage, history,
+        // theme and onboarding changes must not remove and re-add the
+        // bubble (visible flicker) after every dictation. While recording
+        // or transcribing, defer the rebuild until idle.
         scope.launch {
             Store.prefsFlow(this@BubbleService).collect { newPrefs ->
                 val firstBuild = bubbleView == null
+                val appearanceChanged = firstBuild ||
+                    newPrefs.bubbleSize != prefs.bubbleSize ||
+                    newPrefs.bubbleOpacity != prefs.bubbleOpacity ||
+                    newPrefs.bubbleColor != prefs.bubbleColor ||
+                    newPrefs.bubbleShape != prefs.bubbleShape ||
+                    newPrefs.snapToEdge != prefs.snapToEdge ||
+                    newPrefs.showWaveform != prefs.showWaveform ||
+                    newPrefs.haptic != prefs.haptic ||
+                    newPrefs.bubbleEnabled != prefs.bubbleEnabled
                 prefs = newPrefs
                 when {
                     firstBuild -> buildBubble()
-                    state == BubbleState.IDLE -> rebuildBubble()
-                    else -> pendingRebuild = true
+                    appearanceChanged && state == BubbleState.IDLE -> rebuildBubble()
+                    appearanceChanged -> pendingRebuild = true
+                    else -> { /* Non-appearance change: keep the bubble as it is. */ }
                 }
             }
         }

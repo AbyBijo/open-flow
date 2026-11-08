@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Splash screen background: the dark app background, so the logo tile reads the same as in the app. -->
+    <color name="splash_background">#0D0D18</color>
+</resources>

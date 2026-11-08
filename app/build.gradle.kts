@@ -12,8 +12,8 @@ android {
         applicationId = "com.abybijo.openflow"
         minSdk = 26
         targetSdk = 36
-        versionCode = 7
-        versionName = "2.0.5"
+        versionCode = 8
+        versionName = "2.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -74,6 +74,7 @@ android {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)

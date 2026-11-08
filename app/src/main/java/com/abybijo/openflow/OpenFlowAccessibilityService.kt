@@ -24,8 +24,9 @@ import kotlinx.coroutines.delay
  *
  * Never inserts into password fields, and never into banking or
  * password-manager apps — those always fall back to the clipboard.
- * The service only looks at the field that has input focus, and only
- * when a dictation has just finished.
+ * The service looks at the field that has input focus, falling back to
+ * the first editable field in the window when no field reports focus,
+ * and only when a dictation has just finished.
  */
 class OpenFlowAccessibilityService : AccessibilityService() {
 
@@ -49,6 +50,33 @@ class OpenFlowAccessibilityService : AccessibilityService() {
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             clipboard?.setPrimaryClip(ClipData.newPlainText("OpenFlow", text))
         }
+    }
+
+    /**
+     * Fallback when no field reports input focus: walk the window tree
+     * breadth-first for the first editable, visible, non-password field.
+     * Used only when findFocus(FOCUS_INPUT) finds nothing — some apps
+     * (WebView-based fields, custom editors) never report focus.
+     * Nodes traversed along the way are recycled; the returned node, if
+     * any, belongs to the caller.
+     */
+    private fun findEditableNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        while (queue.isNotEmpty()) {
+            val node = queue.removeFirst()
+            if (node.isEditable && !node.isPassword && node.isVisibleToUser) {
+                return node
+            }
+            for (i in 0 until node.childCount) {
+                val child = try { node.getChild(i) } catch (_: Exception) { null }
+                if (child != null) queue.add(child)
+            }
+            if (node !== root) {
+                try { node.recycle() } catch (_: Exception) { }
+            }
+        }
+        return null
     }
 
     override fun onServiceConnected() {
@@ -82,7 +110,7 @@ class OpenFlowAccessibilityService : AccessibilityService() {
             root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         } catch (_: Exception) {
             null
-        }
+        } ?: findEditableNode(root)
         if (node == null) {
             try { root.recycle() } catch (_: Exception) { }
             return false
@@ -124,7 +152,12 @@ class OpenFlowAccessibilityService : AccessibilityService() {
                 merged
             )
             if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
-                return true
+                // Verify the text actually landed before reporting success:
+                // some fields accept the action and silently drop it.
+                try { node.refresh() } catch (_: Exception) { }
+                val after = try { node.text?.toString().orEmpty() } catch (_: Exception) { "" }
+                if (after.contains(text)) return true
+                // Not there — fall through to clipboard + paste.
             }
             // 2. Clipboard + paste.
             copyToClipboard(this, text)
