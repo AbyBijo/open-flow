@@ -7,6 +7,7 @@ import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -1477,7 +1478,7 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
                     contentScale = ContentScale.Crop
                 )
                 Text("About OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp))
-                Text("Version 2.0.1", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                Text("Version 2.0.2", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
             }
         }
         AnimItem(2) {
