@@ -2,46 +2,32 @@
 
 Free, open-source Android voice dictation — a replacement for Wispr Flow, with no account system.
 
-Speak into the mic, see live dictation on screen, copy it instantly, or delete it — and the deleted text is saved to History. Your total word count never resets.
+Speak in any app with a floating bubble, and your words appear as text — powered by your own free Groq API key.
 
 - **Package:** `com.abybijo.openflow`
 - **Min / target:** Android 8.0 (API 26) to Android 16 (API 36)
 - **Build:** Kotlin, Jetpack Compose, Gradle Kotlin DSL
-- **Engine:** whisper.cpp, on-device. Audio never leaves the phone.
-- **Theme:** Black and white, simple blue (`#0A84FF`) accent, clean Apple-like feel. No emojis anywhere in the UI — every icon (mic, download, copy, delete, check, lock, write, arrow) is a custom-made vector drawable in `app/src/main/res/drawable/`.
+- **Engine (v2):** Groq Cloud, `whisper-large-v3-turbo`, bring your own key (BYOK). No local model, no NDK.
+- **Theme:** light `#F5F5FA` / dark `#0D0D18`, purple gradient `#5B5BF0` → `#8B5CF6`, rounded cards, no emojis anywhere — every icon is a custom-made vector drawable in `app/src/main/res/drawable/`.
 
-## Models — pick one, or more
+## How it works (v2)
 
-Download directly in the app from Hugging Face, public dataset `ggerganov/whisper.cpp`, no login:
+1. **Onboarding (first run only):** welcome → get your free Groq key (steps + link to the Groq Console) → audio-and-Groq consent (mandatory checkbox) → paste your key, **verified live** against `GET https://api.groq.com/openai/v1/models` (HTTP 200 = verified, 401 = invalid key) → permissions (Microphone, Display over other apps; Accessibility is optional).
+2. **Floating bubble:** tap the bubble in any text field, speak, tap again. The recording (16 kHz mono WAV, max 60 s per utterance) is sent to Groq and the text is inserted at the cursor via the Accessibility Service. If there is no editable field, or the service is off, the text is copied to the clipboard instead. The bubble never inserts into password fields or banking / password-manager apps.
+3. **Home:** greeting, Flow bubble toggle, free usage today (progress ring, minutes of 8 hours, tracked from real recorded audio and reset at midnight), "Try the bubble" in-app demo (a fake Messages chat where you dictate for real), Recent dictations (tap to copy, local only).
+4. **Settings:** bubble size / opacity / colour (5 presets) / shape (Circle / Pill) / snap-to-edge / waveform, Groq API key (masked, Change re-runs live verification), auto-punctuation, haptic feedback, theme (System / Light / Dark), and a separate About page.
 
-| Group | Models | File size |
-|---|---|---|
-| Main | Tiny, Base, Small | 75 MB, 142 MB, 466 MB |
-| English-only | Tiny.en, Base.en, Small.en | 75 MB, 142 MB, 466 MB |
-| Quantized | Tiny Q5_1, Base Q5_1, Small Q5_1 | 32 MB, 60 MB, 190 MB |
+## Groq free tier
 
-Links are `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/<file>`, e.g. `ggml-tiny.bin`, `ggml-base.en.bin`, `ggml-small-q5_1.bin`. The `ggml.ggerganov.com` mirror is the fallback if Hugging Face fails.
+Groq's free plan covers Whisper at 20 requests/minute, 2,000 requests/day, 7,200 audio seconds/hour and **28,800 audio seconds/day — 8 hours of dictation a day**, no credit card. The key is stored only on the phone in EncryptedSharedPreferences and is never logged. Each user uses their own quota, so there is no server bill for the developer and no server at all for OpenFlow.
 
-Downloads go **only** to the app's internal storage (`filesDir/models/`), never to the Downloads folder, with an animated progress indicator, cancel, and SHA-256 verification where the catalogue pins one. Dictation stays locked until the selected model is downloaded and verified. Model download UI appears **only in the Models page** — the Dictate page shows the current model and a link to Models, but no download button or progress.
+## About
 
-## Features in v1
+Developer: Aby Bijo — GitHub https://github.com/AbyBijo, LinkedIn https://www.linkedin.com/in/aby-bijo-102359282, repository https://github.com/AbyBijo/open-flow, Buy Me a Coffee https://www.buymeacoffee.com/AbyBijo.
 
-- Model picker: Main, English-only, and Quantized Tiny / Base / Small
-- Live dictation: mic recording at 16 kHz mono, transcribed in ~6-second chunks so text appears while you speak
-- Copy button: copies the current dictation instantly
-- Delete button: clears the current dictation **and** saves it as a History entry
-- Total words spoken: a lifetime counter, shown on the main screen, never reduced by a delete
-- History tab: saved dictations with copy and per-entry delete
-- Onboarding and tutorial: a 4-step first-run walkthrough (welcome, privacy, download a model, dictate/copy/history), re-openable from Settings
-- Settings page: developer info (Aby Bijo, GitHub, portfolio, LinkedIn), support link (GitHub Issues), and real settings — theme (System / Light / Dark), default model, clear history, storage info
-- No account, no analytics, no server, no audio upload
+## v1 → v2
 
-## Honest v1 limits
-
-- Live dictation is chunked-live (~6 seconds per chunk), not sample-by-sample streaming. Whisper transcribes finished chunks.
-- The native whisper.cpp library is fetched at build time via CMake FetchContent (tag `v1.7.5`). If that tag or the whisper target changes upstream, the native build will need that tag updated.
-- Quantized models are verified by file size only in v1 (no pinned SHA in the catalogue for q5_1 files).
-- This workspace has no Android SDK, so v1 was statically checked here; the real proof is the GitHub Actions build in this repo.
+v1 ran Whisper on-device with whisper.cpp (native JNI, model downloads). v2 replaces that engine entirely: no local model, no NDK/CMake, no model downloading. Dictation now needs internet and a free Groq key, and in return it is faster, more accurate (Large v3 Turbo instead of Tiny), and works from a floating bubble in any app.
 
 ## Build
 
@@ -66,4 +52,4 @@ When those secrets are present, CI decodes the keystore to a temporary file, sig
 
 ## Privacy
 
-Only account details are never collected — there is no account at all. Model files and history live in the app's private internal storage. The only network use is downloading a model file from Hugging Face (or its mirror).
+There is no account and no OpenFlow server. Dictation audio is sent to Groq (under your own API key) to be turned into text; OpenFlow never stores your audio. History and usage live in the app's private internal storage. Your Groq key is stored encrypted on the device.

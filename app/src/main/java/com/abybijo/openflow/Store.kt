@@ -3,142 +3,161 @@ package com.abybijo.openflow
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
-val Context.openFlowDataStore: DataStore<Preferences> by preferencesDataStore(name = "openflow")
+val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "openflow_prefs")
 
-data class HistoryEntry(
-    val id: Long,
-    val timestamp: Long,
-    val modelName: String,
-    val text: String,
-    val wordCount: Int
+data class RecentEntry(val timestamp: Long, val text: String)
+
+data class Prefs(
+    val onboardingDone: Boolean = false,
+    val theme: String = "system", // system | light | dark
+    val bubbleEnabled: Boolean = true,
+    val bubbleSize: Int = 58,
+    val bubbleOpacity: Int = 100,
+    val bubbleColor: Int = 0,
+    val bubbleShape: String = "circle", // circle | pill
+    val snapToEdge: Boolean = true,
+    val showWaveform: Boolean = true,
+    val autoPunctuation: Boolean = true,
+    val haptic: Boolean = true,
+    val usageDate: String = "",
+    val usageSeconds: Int = 0,
+    val recent: List<RecentEntry> = emptyList()
 )
 
 object Store {
-    private val totalWordsKey = longPreferencesKey("total_words")
-    private val selectedModelKey = stringPreferencesKey("selected_model")
-    private val downloadedKey = stringSetPreferencesKey("downloaded_models")
-    private val importedKey = stringSetPreferencesKey("imported_model_files")
-    private val customModelKey = stringPreferencesKey("custom_model_file")
-    private val cacheEnabledKey = androidx.datastore.preferences.core.booleanPreferencesKey("active_cache_enabled")
-    private val onboardingDoneKey = androidx.datastore.preferences.core.booleanPreferencesKey("onboarding_done")
-    private val themeModeKey = stringPreferencesKey("theme_mode") // system | light | dark
+    private val ONBOARDING_DONE = booleanPreferencesKey("onboarding_done")
+    private val THEME = stringPreferencesKey("theme")
+    private val BUBBLE_ENABLED = booleanPreferencesKey("bubble_enabled")
+    private val BUBBLE_SIZE = intPreferencesKey("bubble_size")
+    private val BUBBLE_OPACITY = intPreferencesKey("bubble_opacity")
+    private val BUBBLE_COLOR = intPreferencesKey("bubble_color")
+    private val BUBBLE_SHAPE = stringPreferencesKey("bubble_shape")
+    private val SNAP = booleanPreferencesKey("snap_to_edge")
+    private val WAVEFORM = booleanPreferencesKey("show_waveform")
+    private val AUTO_PUNCT = booleanPreferencesKey("auto_punctuation")
+    private val HAPTIC = booleanPreferencesKey("haptic")
+    private val USAGE_DATE = stringPreferencesKey("usage_date")
+    private val USAGE_SECONDS = intPreferencesKey("usage_seconds")
+    private val RECENT_JSON = stringPreferencesKey("recent_json")
 
-    suspend fun loadOnboardingDone(context: Context): Boolean =
-        context.openFlowDataStore.data.first()[onboardingDoneKey] ?: false
+    fun todayString(): String =
+        SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
 
-    suspend fun saveOnboardingDone(context: Context, done: Boolean) {
-        context.openFlowDataStore.edit { it[onboardingDoneKey] = done }
+    fun prefsFlow(context: Context): Flow<Prefs> = context.dataStore.data.map { p ->
+        val today = todayString()
+        val storedDate = p[USAGE_DATE] ?: ""
+        val usageSeconds = if (storedDate == today) (p[USAGE_SECONDS] ?: 0) else 0
+        Prefs(
+            onboardingDone = p[ONBOARDING_DONE] ?: false,
+            theme = p[THEME] ?: "system",
+            bubbleEnabled = p[BUBBLE_ENABLED] ?: true,
+            bubbleSize = (p[BUBBLE_SIZE] ?: 58).coerceIn(44, 84),
+            bubbleOpacity = (p[BUBBLE_OPACITY] ?: 100).coerceIn(40, 100),
+            bubbleColor = (p[BUBBLE_COLOR] ?: 0).coerceIn(0, 4),
+            bubbleShape = p[BUBBLE_SHAPE] ?: "circle",
+            snapToEdge = p[SNAP] ?: true,
+            showWaveform = p[WAVEFORM] ?: true,
+            autoPunctuation = p[AUTO_PUNCT] ?: true,
+            haptic = p[HAPTIC] ?: true,
+            usageDate = storedDate,
+            usageSeconds = usageSeconds,
+            recent = parseRecent(p[RECENT_JSON] ?: "[]")
+        )
     }
 
-    suspend fun loadThemeMode(context: Context): String =
-        context.openFlowDataStore.data.first()[themeModeKey] ?: "system"
-
-    suspend fun saveThemeMode(context: Context, mode: String) {
-        context.openFlowDataStore.edit { it[themeModeKey] = mode }
-    }
-
-    fun clearHistory(context: Context) {
-        historyFile(context).delete()
-    }
-
-    suspend fun loadTotalWords(context: Context): Long =
-        context.openFlowDataStore.data.first()[totalWordsKey] ?: 0L
-
-    suspend fun saveTotalWords(context: Context, value: Long) {
-        context.openFlowDataStore.edit { it[totalWordsKey] = value }
-    }
-
-    suspend fun loadSelectedModel(context: Context): String =
-        context.openFlowDataStore.data.first()[selectedModelKey] ?: "tiny"
-
-    suspend fun saveSelectedModel(context: Context, id: String) {
-        context.openFlowDataStore.edit { it[selectedModelKey] = id }
-    }
-
-    suspend fun loadDownloaded(context: Context): Set<String> =
-        context.openFlowDataStore.data.first()[downloadedKey] ?: emptySet()
-
-    suspend fun saveDownloaded(context: Context, ids: Set<String>) {
-        context.openFlowDataStore.edit { it[downloadedKey] = ids }
-    }
-
-    suspend fun loadImportedFiles(context: Context): Set<String> =
-        context.openFlowDataStore.data.first()[importedKey] ?: emptySet()
-
-    suspend fun saveImportedFiles(context: Context, files: Set<String>) {
-        context.openFlowDataStore.edit { it[importedKey] = files }
-    }
-
-    suspend fun loadCustomModelFile(context: Context): String? =
-        context.openFlowDataStore.data.first()[customModelKey]
-
-    suspend fun saveCustomModelFile(context: Context, fileName: String?) {
-        context.openFlowDataStore.edit {
-            if (fileName == null) it.remove(customModelKey) else it[customModelKey] = fileName
-        }
-    }
-
-    suspend fun loadCacheEnabled(context: Context): Boolean =
-        context.openFlowDataStore.data.first()[cacheEnabledKey] ?: true
-
-    suspend fun saveCacheEnabled(context: Context, enabled: Boolean) {
-        context.openFlowDataStore.edit { it[cacheEnabledKey] = enabled }
-    }
-
-    fun importedFile(context: Context, fileName: String): File =
-        File(modelsDir(context), fileName)
-
-    private fun historyFile(context: Context): File = File(context.filesDir, "history.json")
-
-    fun loadHistory(context: Context): List<HistoryEntry> {
-        val file = historyFile(context)
-        if (!file.exists()) return emptyList()
+    private fun parseRecent(json: String): List<RecentEntry> {
         return try {
-            val array = JSONArray(file.readText())
-            (0 until array.length()).map { i ->
-                val o = array.getJSONObject(i)
-                HistoryEntry(
-                    id = o.optLong("id"),
-                    timestamp = o.optLong("timestamp"),
-                    modelName = o.optString("model"),
-                    text = o.optString("text"),
-                    wordCount = o.optInt("words")
-                )
+            val arr = JSONArray(json)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.getJSONObject(i)
+                RecentEntry(o.optLong("t"), o.optString("text"))
             }.sortedByDescending { it.timestamp }
         } catch (_: Exception) {
             emptyList()
         }
     }
 
-    fun saveHistory(context: Context, entries: List<HistoryEntry>) {
-        val array = JSONArray()
-        entries.sortedByDescending { it.timestamp }.forEach { e ->
+    private fun recentJson(entries: List<RecentEntry>): String {
+        val arr = JSONArray()
+        entries.sortedByDescending { it.timestamp }.take(20).forEach { e ->
             val o = JSONObject()
-            o.put("id", e.id)
-            o.put("timestamp", e.timestamp)
-            o.put("model", e.modelName)
+            o.put("t", e.timestamp)
             o.put("text", e.text)
-            o.put("words", e.wordCount)
-            array.put(o)
+            arr.put(o)
         }
-        historyFile(context).writeText(array.toString())
+        return arr.toString()
     }
 
-    fun modelsDir(context: Context): File = File(context.filesDir, "models").apply { mkdirs() }
+    suspend fun setOnboardingDone(context: Context) {
+        context.dataStore.edit { it[ONBOARDING_DONE] = true }
+    }
 
-    fun modelFile(context: Context, model: WhisperModel): File =
-        File(modelsDir(context), model.fileName)
+    suspend fun setTheme(context: Context, theme: String) {
+        context.dataStore.edit { it[THEME] = theme }
+    }
+
+    suspend fun setBubbleEnabled(context: Context, enabled: Boolean) {
+        context.dataStore.edit { it[BUBBLE_ENABLED] = enabled }
+    }
+
+    suspend fun setBubbleSize(context: Context, size: Int) {
+        context.dataStore.edit { it[BUBBLE_SIZE] = size }
+    }
+
+    suspend fun setBubbleOpacity(context: Context, opacity: Int) {
+        context.dataStore.edit { it[BUBBLE_OPACITY] = opacity }
+    }
+
+    suspend fun setBubbleColor(context: Context, index: Int) {
+        context.dataStore.edit { it[BUBBLE_COLOR] = index }
+    }
+
+    suspend fun setBubbleShape(context: Context, shape: String) {
+        context.dataStore.edit { it[BUBBLE_SHAPE] = shape }
+    }
+
+    suspend fun setSnapToEdge(context: Context, snap: Boolean) {
+        context.dataStore.edit { it[SNAP] = snap }
+    }
+
+    suspend fun setShowWaveform(context: Context, show: Boolean) {
+        context.dataStore.edit { it[WAVEFORM] = show }
+    }
+
+    suspend fun setAutoPunctuation(context: Context, on: Boolean) {
+        context.dataStore.edit { it[AUTO_PUNCT] = on }
+    }
+
+    suspend fun setHaptic(context: Context, on: Boolean) {
+        context.dataStore.edit { it[HAPTIC] = on }
+    }
+
+    /** Add a finished dictation: save to Recent and add its audio seconds to today's usage. */
+    suspend fun addDictation(context: Context, text: String, audioSeconds: Int) {
+        val current = context.dataStore.data.first()
+        val today = todayString()
+        val storedDate = current[USAGE_DATE] ?: ""
+        val baseSeconds = if (storedDate == today) (current[USAGE_SECONDS] ?: 0) else 0
+        val recent = parseRecent(current[RECENT_JSON] ?: "[]").toMutableList()
+        recent.add(0, RecentEntry(System.currentTimeMillis(), text))
+        context.dataStore.edit {
+            it[USAGE_DATE] = today
+            it[USAGE_SECONDS] = baseSeconds + audioSeconds.coerceAtLeast(0)
+            it[RECENT_JSON] = recentJson(recent)
+        }
+    }
 }
-
-fun countWords(text: String): Int =
-    text.trim().split(Regex("\\s+")).count { it.isNotBlank() }

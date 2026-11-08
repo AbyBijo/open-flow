@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">OpenFlow</string>
+    <string name="a11y_description">OpenFlow inserts dictated text at the cursor in the text field you are using. It only reads the focused text field when a dictation is ready. It never reads passwords, banking apps, or other screen content.</string>
 </resources>
