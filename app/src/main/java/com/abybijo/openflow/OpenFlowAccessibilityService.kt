@@ -16,7 +16,9 @@ import kotlinx.coroutines.delay
  * can lag behind the overlay tap):
  *  1. Focus the field, then splice at the cursor — or append at the end
  *     when the field reports no selection (common in WebView fields).
- *     The clipboard is never touched.
+ *     The clipboard is never touched. A field whose whole content is just
+ *     its placeholder hint (e.g. WhatsApp's "Message") is treated as
+ *     empty, so the hint is never pasted in front of a dictation.
  *  2. Copy to clipboard + ACTION_PASTE.
  *  3. Caller falls back to clipboard-only.
  *
@@ -99,7 +101,13 @@ class OpenFlowAccessibilityService : AccessibilityService() {
 
             // 1. Splice at the cursor. When the field reports no selection
             // (selection -1), append at the end instead of giving up.
-            val existing = node.text?.toString().orEmpty()
+            // Some fields (WhatsApp's "Message", Chrome's address bar) report
+            // their placeholder hint as the field text when empty. If the
+            // whole content is just the hint, the field is really empty —
+            // otherwise the hint gets pasted in front of every dictation.
+            val rawExisting = node.text?.toString().orEmpty()
+            val hint = try { node.hintText?.toString().orEmpty() } catch (_: Exception) { "" }
+            val existing = if (rawExisting.isNotEmpty() && rawExisting == hint) "" else rawExisting
             val start: Int
             val end: Int
             if (node.textSelectionStart >= 0) {
