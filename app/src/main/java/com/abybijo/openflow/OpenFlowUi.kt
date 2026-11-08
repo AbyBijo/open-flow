@@ -904,7 +904,7 @@ fun HomeContent(
         }
         AnimItem(2) {
             val minutes = prefs.usageSeconds / 60
-            val percent = ((prefs.usageSeconds / 480f) * 100).toInt().coerceIn(0, 100)
+            val percent = ((prefs.usageSeconds / 28800f) * 100).toInt().coerceIn(0, 100)
             AppCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     UsageRing(percent = percent)
@@ -1185,7 +1185,7 @@ fun BubblePreview(prefs: Prefs, recording: Boolean) {
             .size(width, size)
             .clip(RoundedCornerShape(size / 2))
             .background(
-                if (recording) Red
+                if (recording) Brush.linearGradient(listOf(Red, Red))
                 else Brush.linearGradient(listOf(Color(colors.first), Color(colors.second)))
             ),
         contentAlignment = Alignment.Center
