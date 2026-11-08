@@ -93,7 +93,7 @@ object Store {
 
     private fun recentJson(entries: List<RecentEntry>): String {
         val arr = JSONArray()
-        entries.sortedByDescending { it.timestamp }.take(20).forEach { e ->
+        entries.sortedByDescending { it.timestamp }.take(100).forEach { e ->
             val o = JSONObject()
             o.put("t", e.timestamp)
             o.put("text", e.text)

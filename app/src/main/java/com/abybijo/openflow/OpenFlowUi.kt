@@ -4,10 +4,13 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -18,6 +21,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,8 +32,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -64,6 +72,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -76,7 +85,10 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 // ---------- Theme (from the HTML spec) ----------
 
@@ -121,8 +133,8 @@ fun OpenFlowTheme(isDark: Boolean, content: @Composable () -> Unit) {
 fun ColumnScope.AnimItem(index: Int, content: @Composable () -> Unit) {
     AnimatedVisibility(
         visible = true,
-        enter = fadeIn(tween(450, delayMillis = index * 55)) +
-            slideInVertically(tween(600, delayMillis = index * 55)) { it / 3 }
+        enter = fadeIn(tween(300, delayMillis = index * 55)) +
+            slideInVertically(tween(300, delayMillis = index * 55)) { it / 3 }
     ) {
         content()
     }
@@ -136,17 +148,27 @@ fun GradientButton(
     enabled: Boolean = true,
     iconRes: Int? = null
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (pressed) 0.97f else 1f,
+        animationSpec = tween(150), label = "pressScale"
+    )
     Box(
         modifier = modifier
             .fillMaxWidth()
             .height(56.dp)
-            .graphicsLayer { alpha = if (enabled) 1f else 0.35f }
+            .graphicsLayer {
+                alpha = if (enabled) 1f else 0.35f
+                scaleX = pressScale
+                scaleY = pressScale
+            }
             .clip(RoundedCornerShape(18.dp))
             .background(
                 Brush.linearGradient(listOf(Accent, Accent2)),
                 RoundedCornerShape(18.dp)
             )
-            .clickable(enabled = enabled, onClick = onClick),
+            .clickable(interactionSource = interactionSource, indication = null, enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -169,13 +191,23 @@ fun GradientButton(
 
 @Composable
 fun GhostButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, iconRes: Int? = null) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (pressed) 0.97f else 1f,
+        animationSpec = tween(150), label = "pressScale"
+    )
     Box(
         modifier = modifier
             .height(56.dp)
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
             .clip(RoundedCornerShape(18.dp))
             .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(18.dp))
             .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(18.dp))
-            .clickable(onClick = onClick),
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -277,6 +309,21 @@ fun greeting(): String {
     }
 }
 
+/** "Today, 7:42 PM" for today's entries, otherwise "8 Nov, 7:42 PM". Device locale, 12-hour clock. */
+fun formatRecentTime(timestamp: Long): String {
+    val entry = Calendar.getInstance().apply { timeInMillis = timestamp }
+    val now = Calendar.getInstance()
+    val timePart = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(timestamp))
+    val sameDay = now.get(Calendar.YEAR) == entry.get(Calendar.YEAR) &&
+        now.get(Calendar.DAY_OF_YEAR) == entry.get(Calendar.DAY_OF_YEAR)
+    return if (sameDay) {
+        "Today, $timePart"
+    } else {
+        val datePart = SimpleDateFormat("d MMM", Locale.getDefault()).format(Date(timestamp))
+        "$datePart, $timePart"
+    }
+}
+
 // ---------- App root ----------
 
 @Composable
@@ -304,6 +351,18 @@ fun OpenFlowApp(
     LaunchedEffect(prefs.onboardingDone) {
         if (prefs.onboardingDone && route is Route.Onboarding) route = Route.Home
     }
+    // System Back: step back through onboarding, Demo/About/ChangeKey to
+    // their parent screen, Settings to Home. Home keeps the default
+    // behaviour (exits the app).
+    val backAction: (() -> Unit)? = when (val r = route) {
+        is Route.Onboarding -> if (r.step > 0) ({ route = Route.Onboarding(r.step - 1) }) else null
+        Route.Demo -> ({ route = Route.Home })
+        Route.About -> ({ route = Route.Settings })
+        Route.ChangeKey -> ({ route = Route.Settings })
+        Route.Settings -> ({ route = Route.Home })
+        Route.Home -> null
+    }
+    BackHandler(enabled = backAction != null) { backAction?.invoke() }
     OpenFlowTheme(isDark = isDark) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             // Until the stored preferences have actually loaded, show a
@@ -340,7 +399,9 @@ fun OpenFlowApp(
                     onCopyText = onCopyText,
                     onStartBubble = onStartBubble,
                     onStopBubble = onStopBubble,
-                    onToast = onToast
+                    onToast = onToast,
+                    a11yGranted = a11yGranted,
+                    onOpenA11ySettings = onOpenA11ySettings
                 )
                 Route.Settings -> MainScreen(
                     vm = vm, prefs = prefs, tab = 1,
@@ -350,16 +411,27 @@ fun OpenFlowApp(
                     onStartBubble = onStartBubble,
                     onStopBubble = onStopBubble,
                     onToast = onToast,
+                    a11yGranted = a11yGranted,
+                    onOpenA11ySettings = onOpenA11ySettings,
                     onAbout = { route = Route.About },
                     onChangeKey = { route = Route.ChangeKey }
                 )
                 Route.Demo -> DemoScreen(vm = vm, onClose = { route = Route.Home }, onRequestMic = onRequestMic, micGranted = micGranted, onToast = onToast)
                 Route.About -> AboutScreen(onBack = { route = Route.Settings }, onOpenUrl = onOpenUrl)
-                Route.ChangeKey -> KeyScreen(
-                    vm = vm, isChange = true,
-                    onDone = { route = Route.Settings },
-                    onBack = { route = Route.Settings }
-                )
+                Route.ChangeKey -> Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .statusBarPadding()
+                        .navigationBarPadding()
+                        .imePadding()
+                        .padding(horizontal = 22.dp)
+                ) {
+                    KeyScreen(
+                        vm = vm, isChange = true,
+                        onDone = { route = Route.Settings },
+                        onBack = { route = Route.Settings }
+                    )
+                }
             }
         }
     }
@@ -421,11 +493,16 @@ fun OnboardingScreen(
     onFinish: () -> Unit
 ) {
     LaunchedEffect(Unit) { onRefreshPermissions() }
+    // The step content scrolls; the action buttons live outside the scroll
+    // area, pinned to the bottom, so they are always visible without
+    // scrolling. imePadding keeps the keyboard from covering them.
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(22.dp)
+            .statusBarPadding()
+            .navigationBarPadding()
+            .imePadding()
+            .padding(horizontal = 22.dp)
     ) {
         when (step) {
             0 -> WelcomeStep(onStep)
@@ -494,39 +571,41 @@ fun WelcomeStep(onStep: (Int) -> Unit) {
 
 @Composable
 fun GetKeyStep(onStep: (Int) -> Unit, onOpenUrl: (String) -> Unit) {
-    Column {
-        AnimItem(0) { ProgressDots(current = 2) }
-        AnimItem(1) {
-            Text("Get your free Groq key", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp))
-        }
-        AnimItem(2) {
-            Text("It takes about a minute.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f), modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
-        }
-        AnimItem(3) {
-            AppCard {
-                listOf(
-                    "Open the Groq Console in your browser.",
-                    "Tap Continue with Google to create your account.",
-                    "Go to API Keys and tap Create API Key.",
-                    "Copy the key that starts with gsk_."
-                ).forEachIndexed { i, text ->
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 13.dp)) {
-                        Box(
-                            modifier = Modifier.size(30.dp).clip(RoundedCornerShape(15.dp)).background(Accent),
-                            contentAlignment = Alignment.Center
-                        ) { Text("${i + 1}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp) }
-                        Spacer(Modifier.width(14.dp))
-                        Text(text, fontSize = 16.sp)
+    Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            AnimItem(0) { ProgressDots(current = 2) }
+            AnimItem(1) {
+                Text("Get your free Groq key", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp))
+            }
+            AnimItem(2) {
+                Text("It takes about a minute.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f), modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
+            }
+            AnimItem(3) {
+                AppCard {
+                    listOf(
+                        "Open the Groq Console in your browser.",
+                        "Tap Continue with Google to create your account.",
+                        "Go to API Keys and tap Create API Key.",
+                        "Copy the key that starts with gsk_."
+                    ).forEachIndexed { i, text ->
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 13.dp)) {
+                            Box(
+                                modifier = Modifier.size(30.dp).clip(RoundedCornerShape(15.dp)).background(Accent),
+                                contentAlignment = Alignment.Center
+                            ) { Text("${i + 1}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp) }
+                            Spacer(Modifier.width(14.dp))
+                            Text(text, fontSize = 16.sp)
+                        }
+                        if (i < 3) Spacer(Modifier.height(1.dp).fillMaxWidth().background(MaterialTheme.colorScheme.outline))
                     }
-                    if (i < 3) Spacer(Modifier.height(1.dp).fillMaxWidth().background(MaterialTheme.colorScheme.outline))
                 }
             }
-        }
-        AnimItem(4) {
+            AnimItem(4) {
+                Spacer(Modifier.height(8.dp))
+                GhostButton(text = "Open Groq Console", onClick = { onOpenUrl("https://console.groq.com/keys") }, modifier = Modifier.fillMaxWidth(), iconRes = R.drawable.ic_external)
+            }
             Spacer(Modifier.height(8.dp))
-            GhostButton(text = "Open Groq Console", onClick = { onOpenUrl("https://console.groq.com/keys") }, modifier = Modifier.fillMaxWidth(), iconRes = R.drawable.ic_external)
         }
-        Spacer(Modifier.weight(1f))
         AnimItem(5) {
             GradientButton(text = "I have my key", onClick = { onStep(2) })
         }
@@ -537,63 +616,65 @@ fun GetKeyStep(onStep: (Int) -> Unit, onOpenUrl: (String) -> Unit) {
 @Composable
 fun ConsentStep(onStep: (Int) -> Unit) {
     var checked by remember { mutableStateOf(false) }
-    Column {
-        AnimItem(0) { ProgressDots(current = 3) }
-        AnimItem(1) {
-            Text("Your audio and Groq", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp))
-        }
-        AnimItem(2) {
-            Text("Please read this before continuing.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f), modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
-        }
-        AnimItem(3) {
-            AppCard {
-                Row(verticalAlignment = Alignment.Top) {
-                    IconTile(R.drawable.ic_mic)
-                    Spacer(Modifier.width(14.dp))
-                    Column {
-                        Text("Audio is sent to Groq", fontWeight = FontWeight.Bold)
-                        Text("Your recording is sent to Groq to be turned into text. OpenFlow has no servers and never stores your audio.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+    Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            AnimItem(0) { ProgressDots(current = 3) }
+            AnimItem(1) {
+                Text("Your audio and Groq", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp))
+            }
+            AnimItem(2) {
+                Text("Please read this before continuing.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f), modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
+            }
+            AnimItem(3) {
+                AppCard {
+                    Row(verticalAlignment = Alignment.Top) {
+                        IconTile(R.drawable.ic_mic)
+                        Spacer(Modifier.width(14.dp))
+                        Column {
+                            Text("Audio is sent to Groq", fontWeight = FontWeight.Bold)
+                            Text("Your recording is sent to Groq to be turned into text. OpenFlow has no servers and never stores your audio.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                        }
                     }
                 }
             }
-        }
-        AnimItem(4) {
-            AppCard {
-                Row(verticalAlignment = Alignment.Top) {
-                    IconTile(R.drawable.ic_clock)
-                    Spacer(Modifier.width(14.dp))
-                    Column {
-                        Text("Up to 8 hours a day, free", fontWeight = FontWeight.Bold)
-                        Text("Groq’s free tier covers about 8 hours of dictation daily. Far more than most people need.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+            AnimItem(4) {
+                AppCard {
+                    Row(verticalAlignment = Alignment.Top) {
+                        IconTile(R.drawable.ic_clock)
+                        Spacer(Modifier.width(14.dp))
+                        Column {
+                            Text("Up to 8 hours a day, free", fontWeight = FontWeight.Bold)
+                            Text("Groq’s free tier covers about 8 hours of dictation daily. Far more than most people need.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                        }
                     }
                 }
             }
-        }
-        AnimItem(5) {
-            AppCard {
-                Row(verticalAlignment = Alignment.Top) {
-                    IconTile(R.drawable.ic_lock)
-                    Spacer(Modifier.width(14.dp))
-                    Column {
-                        Text("Your key stays on your phone", fontWeight = FontWeight.Bold)
-                        Text("It’s stored securely on this device and only used to talk to Groq.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+            AnimItem(5) {
+                AppCard {
+                    Row(verticalAlignment = Alignment.Top) {
+                        IconTile(R.drawable.ic_lock)
+                        Spacer(Modifier.width(14.dp))
+                        Column {
+                            Text("Your key stays on your phone", fontWeight = FontWeight.Bold)
+                            Text("It’s stored securely on this device and only used to talk to Groq.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                        }
                     }
                 }
             }
-        }
-        AnimItem(6) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(vertical = 14.dp).clickable { checked = !checked }
-            ) {
-                Checkbox(
-                    checked = checked, onCheckedChange = { checked = it },
-                    colors = CheckboxDefaults.colors(checkedColor = Accent)
-                )
-                Text("I understand my audio will be sent to Groq for dictation.", fontSize = 14.sp)
+            AnimItem(6) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(vertical = 14.dp).clickable { checked = !checked }
+                ) {
+                    Checkbox(
+                        checked = checked, onCheckedChange = { checked = it },
+                        colors = CheckboxDefaults.colors(checkedColor = Accent)
+                    )
+                    Text("I understand my audio will be sent to Groq for dictation.", fontSize = 14.sp)
+                }
             }
+            Spacer(Modifier.height(8.dp))
         }
-        Spacer(Modifier.weight(1f))
         AnimItem(7) {
             Box(modifier = Modifier.fillMaxWidth()) {
                 GradientButton(text = "Continue", onClick = { onStep(3) }, enabled = checked)
@@ -612,10 +693,12 @@ fun KeyScreen(vm: MainViewModel, isChange: Boolean, onDone: () -> Unit, onBack: 
     var message by remember { mutableStateOf("") }
     var messageOk by remember { mutableStateOf(false) }
     var verifying by remember { mutableStateOf(false) }
+    var verified by remember { mutableStateOf(false) }
     var shakeTrigger by remember { mutableIntStateOf(0) }
     var showKey by remember { mutableStateOf(false) }
     val shake = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
+    val keyboardController = LocalSoftwareKeyboardController.current
     LaunchedEffect(shakeTrigger) {
         if (shakeTrigger > 0) {
             listOf(-8f, 8f, -8f, 8f, 0f).forEach { x ->
@@ -623,58 +706,74 @@ fun KeyScreen(vm: MainViewModel, isChange: Boolean, onDone: () -> Unit, onBack: 
             }
         }
     }
-    Column {
-        if (!isChange) AnimItem(0) { ProgressDots(current = 4) }
-        AnimItem(1) {
-            Text(
-                if (isChange) "Change your Groq API key" else "Paste your API key",
-                fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp)
-            )
-        }
-        AnimItem(2) {
-            Text(
-                "Paste the key you copied from the Groq Console.",
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                modifier = Modifier.padding(top = 4.dp, bottom = 18.dp)
-            )
-        }
-        AnimItem(3) {
-            OutlinedTextField(
-                value = key,
-                onValueChange = { key = it.trim(); message = "" },
-                placeholder = { Text("gsk_...") },
-                singleLine = true,
-                visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                trailingIcon = {
-                    Text(
-                        if (showKey) "Hide" else "Show",
-                        color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
-                        modifier = Modifier.clickable { showKey = !showKey }.padding(8.dp)
+    Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            if (!isChange) AnimItem(0) { ProgressDots(current = 4) }
+            AnimItem(1) {
+                Text(
+                    if (isChange) "Change your Groq API key" else "Paste your API key",
+                    fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp)
+                )
+            }
+            AnimItem(2) {
+                Text(
+                    "Paste the key you copied from the Groq Console.",
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                    modifier = Modifier.padding(top = 4.dp, bottom = 18.dp)
+                )
+            }
+            if (verified) {
+                // The key box is gone the moment verification succeeds: only
+                // the masked key and the confirmation remain.
+                AnimItem(3) {
+                    AppCard {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("gsk_••••••••", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Spacer(Modifier.width(10.dp))
+                            Text("Key verified", color = Green, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        }
+                    }
+                }
+            } else {
+                AnimItem(3) {
+                    OutlinedTextField(
+                        value = key,
+                        onValueChange = { key = it.trim(); message = "" },
+                        placeholder = { Text("gsk_...") },
+                        singleLine = true,
+                        visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        trailingIcon = {
+                            Text(
+                                if (showKey) "Hide" else "Show",
+                                color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                                modifier = Modifier.clickable { showKey = !showKey }.padding(8.dp)
+                            )
+                        },
+                        shape = RoundedCornerShape(18.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Accent,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
+                        ),
+                        modifier = Modifier.fillMaxWidth().graphicsLayer { translationX = shake.value }
                     )
-                },
-                shape = RoundedCornerShape(18.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Accent,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                ),
-                modifier = Modifier.fillMaxWidth().graphicsLayer { translationX = shake.value }
-            )
+                }
+                AnimItem(4) {
+                    Text(
+                        message,
+                        color = if (messageOk) Green else Red,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(start = 4.dp, top = 12.dp).height(22.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
         }
-        AnimItem(4) {
-            Text(
-                message,
-                color = if (messageOk) Green else Red,
-                fontSize = 14.sp,
-                modifier = Modifier.padding(start = 4.dp, top = 12.dp).height(22.dp)
-            )
-        }
-        Spacer(Modifier.weight(1f))
         AnimItem(5) {
             GradientButton(
-                text = if (verifying) "Verifying…" else "Verify and continue",
+                text = if (verifying) "Verifying…" else if (verified) "Key verified" else "Verify and continue",
                 onClick = {
-                    if (verifying) return@GradientButton
+                    if (verifying || verified) return@GradientButton
                     val candidate = key.trim()
                     if (!candidate.startsWith("gsk_") || candidate.length <= 12) {
                         messageOk = false
@@ -688,6 +787,8 @@ fun KeyScreen(vm: MainViewModel, isChange: Boolean, onDone: () -> Unit, onBack: 
                         when (val result = GroqClient.verifyKey(candidate)) {
                             is VerifyResult.Ok -> {
                                 vm.saveKey(candidate)
+                                verified = true
+                                keyboardController?.hide()
                                 messageOk = true
                                 message = "Key verified"
                                 verifying = false
@@ -732,67 +833,69 @@ fun PermissionsStep(
     onOpenAppInfo: () -> Unit,
     onFinish: () -> Unit
 ) {
-    Column {
-        AnimItem(0) { ProgressDots(current = 5) }
-        AnimItem(1) {
-            Text("Two quick permissions", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp))
-        }
-        AnimItem(2) {
-            Text("These let the bubble work over your other apps.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f), modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
-        }
-        AnimItem(3) {
-            AppCard {
-                PermissionRow(
-                    iconRes = R.drawable.ic_mic, title = "Microphone",
-                    subtitle = "To hear what you say", granted = micGranted, onClick = onRequestMic
-                )
-                Spacer(Modifier.height(1.dp).fillMaxWidth().background(MaterialTheme.colorScheme.outline))
-                PermissionRow(
-                    iconRes = R.drawable.ic_layers, title = "Display over other apps",
-                    subtitle = "To show the flow bubble", granted = overlayGranted, onClick = onOpenOverlaySettings
-                )
+    Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            AnimItem(0) { ProgressDots(current = 5) }
+            AnimItem(1) {
+                Text("Two quick permissions", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp))
             }
-        }
-        AnimItem(4) {
-            AppCard {
-                Row(verticalAlignment = Alignment.Top) {
-                    IconTile(R.drawable.ic_info)
-                    Spacer(Modifier.width(14.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Accessibility (optional)", fontWeight = FontWeight.Bold)
-                        Text(
-                            "This is what lets dictated text land at the cursor in other apps. It only reads the field that has focus when a dictation is ready. It never reads passwords or banking apps. Without it, dictation falls back to the clipboard.",
-                            fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            if (a11yGranted) "Accessibility is on" else "Open Accessibility Settings",
-                            color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
-                            modifier = Modifier.clickable { onOpenA11ySettings() }
-                        )
-                        if (!a11yGranted) {
-                            Spacer(Modifier.height(10.dp))
+            AnimItem(2) {
+                Text("These let the bubble work over your other apps.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f), modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
+            }
+            AnimItem(3) {
+                AppCard {
+                    PermissionRow(
+                        iconRes = R.drawable.ic_mic, title = "Microphone",
+                        subtitle = "To hear what you say", granted = micGranted, onClick = onRequestMic
+                    )
+                    Spacer(Modifier.height(1.dp).fillMaxWidth().background(MaterialTheme.colorScheme.outline))
+                    PermissionRow(
+                        iconRes = R.drawable.ic_layers, title = "Display over other apps",
+                        subtitle = "To show the flow bubble", granted = overlayGranted, onClick = onOpenOverlaySettings
+                    )
+                }
+            }
+            AnimItem(4) {
+                AppCard {
+                    Row(verticalAlignment = Alignment.Top) {
+                        IconTile(R.drawable.ic_info)
+                        Spacer(Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Accessibility (optional)", fontWeight = FontWeight.Bold)
                             Text(
-                                "If Android shows “Controlled by restricted setting” for OpenFlow, it is because the app was installed directly (not from the Play Store). Fix it in one minute:",
-                                fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                "1. Open App info below.\n2. Tap the ⋮ menu at the top right.\n3. Tap “Allow restricted settings”.\n4. Come back and open Accessibility Settings.",
+                                "This is what lets dictated text land at the cursor in other apps. It only reads the field that has focus when a dictation is ready. It never reads passwords or banking apps. Without it, dictation falls back to the clipboard.",
                                 fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
                             )
                             Spacer(Modifier.height(8.dp))
                             Text(
-                                "Open App info",
+                                if (a11yGranted) "Accessibility is on" else "Open Accessibility Settings",
                                 color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
-                                modifier = Modifier.clickable { onOpenAppInfo() }
+                                modifier = Modifier.clickable { onOpenA11ySettings() }
                             )
+                            if (!a11yGranted) {
+                                Spacer(Modifier.height(10.dp))
+                                Text(
+                                    "If Android shows “Controlled by restricted setting” for OpenFlow, it is because the app was installed directly (not from the Play Store). Fix it in one minute:",
+                                    fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                                )
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    "1. Open App info below.\n2. Tap the ⋮ menu at the top right.\n3. Tap “Allow restricted settings”.\n4. Come back and open Accessibility Settings.",
+                                    fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    "Open App info",
+                                    color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                                    modifier = Modifier.clickable { onOpenAppInfo() }
+                                )
+                            }
                         }
                     }
                 }
             }
+            Spacer(Modifier.height(8.dp))
         }
-        Spacer(Modifier.weight(1f))
         AnimItem(5) {
             GradientButton(
                 text = "Finish setup", onClick = onFinish,
@@ -847,14 +950,16 @@ fun MainScreen(
     onStartBubble: () -> Unit,
     onStopBubble: () -> Unit,
     onToast: (String) -> Unit,
+    a11yGranted: Boolean = true,
+    onOpenA11ySettings: () -> Unit = {},
     onAbout: () -> Unit = {},
     onChangeKey: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(modifier = Modifier.fillMaxSize().statusBarPadding()) {
         Box(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(22.dp)) {
             if (tab == 0) {
-                HomeContent(vm, prefs, onDemo, onCopyText, onStartBubble, onStopBubble, onToast)
+                HomeContent(vm, prefs, onDemo, onCopyText, onStartBubble, onStopBubble, onToast, a11yGranted, onOpenA11ySettings)
             } else {
                 SettingsContent(vm, prefs, context, onAbout, onChangeKey)
             }
@@ -865,6 +970,7 @@ fun MainScreen(
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surface)
                 .border(1.dp, MaterialTheme.colorScheme.outline)
+                .navigationBarPadding()
                 .padding(vertical = 10.dp)
         ) {
             BottomTab(
@@ -916,7 +1022,9 @@ fun HomeContent(
     onCopyText: (String) -> Unit,
     onStartBubble: () -> Unit,
     onStopBubble: () -> Unit,
-    onToast: (String) -> Unit
+    onToast: (String) -> Unit,
+    a11yGranted: Boolean,
+    onOpenA11ySettings: () -> Unit
 ) {
     Column {
         AnimItem(0) {
@@ -934,7 +1042,21 @@ fun HomeContent(
                 }
             }
         }
-        AnimItem(1) {
+        if (!a11yGranted) {
+            AnimItem(1) {
+                Spacer(Modifier.height(18.dp))
+                AppCard {
+                    Text("Paste at cursor is off", fontWeight = FontWeight.Bold)
+                    Text(
+                        "Paste at cursor is off — turn on OpenFlow in Accessibility settings to paste directly into text fields. Until then dictation copies to the clipboard.",
+                        fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                        modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
+                    )
+                    GhostButton(text = "Open Accessibility Settings", onClick = onOpenA11ySettings, modifier = Modifier.fillMaxWidth())
+                }
+            }
+        }
+        AnimItem(2) {
             Spacer(Modifier.height(18.dp))
             AppCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -962,7 +1084,7 @@ fun HomeContent(
                 }
             }
         }
-        AnimItem(2) {
+        AnimItem(3) {
             val minutes = prefs.usageSeconds / 60
             val percent = ((prefs.usageSeconds / 28800f) * 100).toInt().coerceIn(0, 100)
             AppCard {
@@ -976,11 +1098,11 @@ fun HomeContent(
                 }
             }
         }
-        AnimItem(3) {
+        AnimItem(4) {
             Spacer(Modifier.height(6.dp))
             GradientButton(text = "Try the bubble", onClick = onDemo, iconRes = R.drawable.ic_arrow_right)
         }
-        AnimItem(4) {
+        AnimItem(5) {
             AppCard {
                 Text("How to dictate", fontWeight = FontWeight.Bold)
                 Text(
@@ -989,7 +1111,7 @@ fun HomeContent(
                 )
             }
         }
-        AnimItem(5) {
+        AnimItem(6) {
             SectionLabel("Recent")
             if (prefs.recent.isEmpty()) {
                 Text(
@@ -1001,6 +1123,12 @@ fun HomeContent(
                 prefs.recent.forEach { entry ->
                     AppCard(onClick = { onCopyText(entry.text) }) {
                         Text(entry.text, fontSize = 16.sp)
+                        Text(
+                            formatRecentTime(entry.timestamp),
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
                     }
                     Spacer(Modifier.height(6.dp))
                 }
@@ -1283,16 +1411,17 @@ fun BubblePreview(prefs: Prefs, recording: Boolean) {
         contentAlignment = Alignment.Center
     ) {
         if (recording && prefs.showWaveform) {
-            // Animated waveform: each bar breathes on its own phase, so the
-            // recording state is visibly alive — never a static picture.
+            // Animated waveform: seven bars breathing on staggered phases
+            // with an ease-in-out curve, so the recording state moves
+            // smoothly instead of ticking mechanically.
             val transition = rememberInfiniteTransition(label = "waveform")
             Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
-                listOf(6, 14, 24, 12, 18).forEachIndexed { i, h ->
+                listOf(6, 12, 20, 26, 20, 12, 6).forEachIndexed { i, h ->
                     val scale by transition.animateFloat(
                         initialValue = 0.45f,
                         targetValue = 1.6f,
                         animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 620, delayMillis = i * 110),
+                            animation = tween(durationMillis = 700, delayMillis = i * 90, easing = FastOutSlowInEasing),
                             repeatMode = RepeatMode.Reverse
                         ),
                         label = "waveBar$i"
@@ -1329,7 +1458,7 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
     val recorder = remember { WavRecorder() }
     var recordingFile by remember { mutableStateOf<File?>(null) }
 
-    Column(modifier = Modifier.fillMaxSize().padding(22.dp)) {
+    Column(modifier = Modifier.fillMaxSize().statusBarPadding().navigationBarPadding().padding(22.dp)) {
         AnimItem(0) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1460,7 +1589,7 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
 
 @Composable
 fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
-    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(22.dp)) {
+    Column(modifier = Modifier.fillMaxSize().statusBarPadding().navigationBarPadding().verticalScroll(rememberScrollState()).padding(22.dp)) {
         AnimItem(0) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -1478,7 +1607,7 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
                     contentScale = ContentScale.Crop
                 )
                 Text("About OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp))
-                Text("Version 2.0.2", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                Text("Version 2.0.3", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
             }
         }
         AnimItem(2) {

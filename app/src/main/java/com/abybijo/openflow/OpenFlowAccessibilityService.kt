@@ -7,13 +7,16 @@ import android.content.Context
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import kotlinx.coroutines.delay
 
 /**
  * Inserts dictated text into the focused text field of another app.
  *
- * Order of attempts:
- *  1. Splice at the cursor (reads the field text + selection, writes it back
- *     with the dictation inserted). The clipboard is never touched.
+ * Order of attempts (retried up to 3 times, ~200 ms apart, because focus
+ * can lag behind the overlay tap):
+ *  1. Focus the field, then splice at the cursor — or append at the end
+ *     when the field reports no selection (common in WebView fields).
+ *     The clipboard is never touched.
  *  2. Copy to clipboard + ACTION_PASTE.
  *  3. Caller falls back to clipboard-only.
  *
@@ -35,9 +38,9 @@ class OpenFlowAccessibilityService : AccessibilityService() {
         )
 
         /** Returns true if the text landed in a field. False = caller should use clipboard. */
-        fun insertText(context: Context, text: String): Boolean {
+        suspend fun insertText(context: Context, text: String): Boolean {
             val service = instance ?: return false
-            return service.insert(text)
+            return service.insertWithRetry(text)
         }
 
         fun copyToClipboard(context: Context, text: String) {
@@ -62,33 +65,58 @@ class OpenFlowAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {}
 
-    private fun insert(text: String): Boolean {
+    /** Retry the whole insert: the field may not be focused yet right after the overlay tap. */
+    private suspend fun insertWithRetry(text: String): Boolean {
+        repeat(3) { attempt ->
+            if (attemptInsert(text)) return true
+            if (attempt < 2) delay(200)
+        }
+        return false
+    }
+
+    private fun attemptInsert(text: String): Boolean {
         val root = rootInActiveWindow ?: return false
         val node = try {
             root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         } catch (_: Exception) {
             null
-        } ?: return false
+        }
+        if (node == null) {
+            try { root.recycle() } catch (_: Exception) { }
+            return false
+        }
         try {
             if (node.isPassword) return false
             val pkg = node.packageName?.toString().orEmpty().lowercase()
             if (SENSITIVE_PACKAGES.any { pkg.contains(it) }) return false
             if (!node.isEditable) return false
 
-            // 1. Splice at the cursor.
+            // Focus the field first: without focus the splice and the paste
+            // both silently do nothing.
+            if (!node.isFocused) {
+                node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            }
+
+            // 1. Splice at the cursor. When the field reports no selection
+            // (selection -1), append at the end instead of giving up.
             val existing = node.text?.toString().orEmpty()
-            val start = node.textSelectionStart.coerceIn(0, existing.length)
-            val end = node.textSelectionEnd.coerceIn(start, existing.length)
+            val start: Int
+            val end: Int
             if (node.textSelectionStart >= 0) {
-                val merged = existing.substring(0, start) + text + existing.substring(end)
-                val args = Bundle()
-                args.putCharSequence(
-                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                    merged
-                )
-                if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
-                    return true
-                }
+                start = node.textSelectionStart.coerceIn(0, existing.length)
+                end = node.textSelectionEnd.coerceIn(start, existing.length)
+            } else {
+                start = existing.length
+                end = existing.length
+            }
+            val merged = existing.substring(0, start) + text + existing.substring(end)
+            val args = Bundle()
+            args.putCharSequence(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                merged
+            )
+            if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                return true
             }
             // 2. Clipboard + paste.
             copyToClipboard(this, text)

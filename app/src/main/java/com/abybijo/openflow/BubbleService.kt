@@ -34,7 +34,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
-import android.view.animation.LinearInterpolator
+import android.view.animation.AccelerateDecelerateInterpolator
 
 /**
  * The floating Flow bubble: a TYPE_APPLICATION_OVERLAY window that sits over
@@ -154,9 +154,14 @@ class BubbleService : Service() {
             gravity = Gravity.CENTER
             visibility = View.GONE
         }
-        repeat(5) {
+        repeat(7) {
             val bar = View(this).apply {
-                setBackgroundColor(Color.WHITE)
+                // Rounded caps, like the Compose preview.
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    setColor(Color.WHITE)
+                    cornerRadius = dp(2).toFloat()
+                }
                 alpha = 0.9f
             }
             val barParams = LinearLayout.LayoutParams(dp(4), dp(10))
@@ -312,12 +317,17 @@ class BubbleService : Service() {
     private fun startWaveAnimation() {
         stopWaveAnimation()
         val row = waveRow ?: return
+        // Seven bars on one shared ease-in-out curve, each starting a
+        // fraction later — a smooth wave, not a mechanical tick. Runs
+        // while recording and while transcribing.
         waveAnimators = (0 until row.childCount).map { i ->
             val bar = row.getChildAt(i)
-            ObjectAnimator.ofFloat(bar, "scaleY", 0.4f, 1.6f, 0.4f).apply {
-                duration = 700L + i * 90L
+            ObjectAnimator.ofFloat(bar, "scaleY", 0.35f, 1.7f).apply {
+                duration = 650L
+                startDelay = i * 110L
                 repeatCount = ValueAnimator.INFINITE
-                interpolator = LinearInterpolator()
+                repeatMode = ValueAnimator.REVERSE
+                interpolator = AccelerateDecelerateInterpolator()
                 start()
             }
         }
@@ -408,7 +418,7 @@ class BubbleService : Service() {
                 Toast.makeText(this@BubbleService, "Inserted", Toast.LENGTH_SHORT).show()
             } else {
                 OpenFlowAccessibilityService.copyToClipboard(this@BubbleService, text)
-                Toast.makeText(this@BubbleService, "Copied to clipboard", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@BubbleService, "Copied — long-press the field and tap Paste", Toast.LENGTH_LONG).show()
             }
         }
     }
