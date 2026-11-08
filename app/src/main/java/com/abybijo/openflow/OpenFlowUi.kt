@@ -33,10 +33,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -421,8 +421,8 @@ fun OpenFlowApp(
                 Route.ChangeKey -> Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .statusBarPadding()
-                        .navigationBarPadding()
+                        .statusBarsPadding()
+                        .navigationBarsPadding()
                         .imePadding()
                         .padding(horizontal = 22.dp)
                 ) {
@@ -499,8 +499,8 @@ fun OnboardingScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarPadding()
-            .navigationBarPadding()
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .imePadding()
             .padding(horizontal = 22.dp)
     ) {
@@ -956,7 +956,7 @@ fun MainScreen(
     onChangeKey: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    Column(modifier = Modifier.fillMaxSize().statusBarPadding()) {
+    Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
         Box(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(22.dp)) {
             if (tab == 0) {
                 HomeContent(vm, prefs, onDemo, onCopyText, onStartBubble, onStopBubble, onToast, a11yGranted, onOpenA11ySettings)
@@ -970,7 +970,7 @@ fun MainScreen(
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surface)
                 .border(1.dp, MaterialTheme.colorScheme.outline)
-                .navigationBarPadding()
+                .navigationBarsPadding()
                 .padding(vertical = 10.dp)
         ) {
             BottomTab(
@@ -1458,7 +1458,7 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
     val recorder = remember { WavRecorder() }
     var recordingFile by remember { mutableStateOf<File?>(null) }
 
-    Column(modifier = Modifier.fillMaxSize().statusBarPadding().navigationBarPadding().padding(22.dp)) {
+    Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(22.dp)) {
         AnimItem(0) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1589,7 +1589,7 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
 
 @Composable
 fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
-    Column(modifier = Modifier.fillMaxSize().statusBarPadding().navigationBarPadding().verticalScroll(rememberScrollState()).padding(22.dp)) {
+    Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(22.dp)) {
         AnimItem(0) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
