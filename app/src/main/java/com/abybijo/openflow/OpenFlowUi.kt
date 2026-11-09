@@ -1604,7 +1604,7 @@ fun HomeContent(
  * Swipeable stat tabs, replacing the old usage ring. Swipe or tap to
  * switch; the indicator follows the selected tab.
  *
- * Words — words spoken today, with the lifetime total underneath.
+ * Words — words spoken so far (lifetime), with today's count underneath.
  * Free usage — how much of the 8 free Groq hours is left today
  * (on-device dictations never count). Speed — words per minute:
  * words in entries that have a recorded duration, divided by those
@@ -1661,10 +1661,10 @@ fun StatTabs(prefs: Prefs) {
             AppCard {
                 when (page) {
                     0 -> {
-                        Text("$wordsToday", fontSize = 30.sp, fontWeight = FontWeight.Bold)
-                        Text("Words spoken today", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 2.dp))
+                        Text("$wordsLifetime", fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                        Text("Words spoken so far", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 2.dp))
                         Text(
-                            "Lifetime: $wordsLifetime words",
+                            "Today: $wordsToday words",
                             fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
                         )
                     }
