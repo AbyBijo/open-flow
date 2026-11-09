@@ -39,6 +39,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -1948,6 +1949,11 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
                                                 bubbleState = 0
                                                 fieldHint = "Type a message"
                                                 onToast("Groq daily limit reached — try tomorrow.")
+                                            }
+                                            is TranscribeResult.LocalModelMissing -> {
+                                                bubbleState = 0
+                                                fieldHint = "Type a message"
+                                                onToast("On-device model not downloaded. Download one in Settings.")
                                             }
                                             is TranscribeResult.Error -> {
                                                 bubbleState = 0
