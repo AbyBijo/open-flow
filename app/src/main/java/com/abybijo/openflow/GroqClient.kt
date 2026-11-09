@@ -21,6 +21,8 @@ sealed class TranscribeResult {
     data class Ok(val text: String) : TranscribeResult()
     object InvalidKey : TranscribeResult()
     object RateLimited : TranscribeResult()
+    /** The selected on-device model is not downloaded yet. */
+    object LocalModelMissing : TranscribeResult()
     data class Error(val message: String) : TranscribeResult()
 }
 

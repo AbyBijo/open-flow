@@ -35,6 +35,8 @@ data class Prefs(
     val autoPunctuation: Boolean = true,
     val cleanTranscript: Boolean = true,
     val reviewBeforeInsert: Boolean = false,
+    val engine: String = "groq", // groq | local
+    val localModelId: String = ModelCatalog.DEFAULT_MODEL_ID,
     val haptic: Boolean = true,
     val usageDate: String = "",
     val usageSeconds: Int = 0,
@@ -55,6 +57,8 @@ object Store {
     private val AUTO_PUNCT = booleanPreferencesKey("auto_punctuation")
     private val CLEAN_TRANSCRIPT = booleanPreferencesKey("clean_transcript")
     private val REVIEW_BEFORE_INSERT = booleanPreferencesKey("review_before_insert")
+    private val ENGINE = stringPreferencesKey("engine")
+    private val LOCAL_MODEL_ID = stringPreferencesKey("local_model_id")
     private val HAPTIC = booleanPreferencesKey("haptic")
     private val USAGE_DATE = stringPreferencesKey("usage_date")
     private val USAGE_SECONDS = intPreferencesKey("usage_seconds")
@@ -81,6 +85,8 @@ object Store {
             autoPunctuation = p[AUTO_PUNCT] ?: true,
             cleanTranscript = p[CLEAN_TRANSCRIPT] ?: true,
             reviewBeforeInsert = p[REVIEW_BEFORE_INSERT] ?: false,
+            engine = (p[ENGINE] ?: "groq").takeIf { it == "local" } ?: "groq",
+            localModelId = p[LOCAL_MODEL_ID] ?: ModelCatalog.DEFAULT_MODEL_ID,
             haptic = p[HAPTIC] ?: true,
             usageDate = storedDate,
             usageSeconds = usageSeconds,
@@ -164,12 +170,25 @@ object Store {
         context.dataStore.edit { it[REVIEW_BEFORE_INSERT] = on }
     }
 
+    suspend fun setEngine(context: Context, engine: String) {
+        context.dataStore.edit { it[ENGINE] = if (engine == "local") "local" else "groq" }
+    }
+
+    suspend fun setLocalModelId(context: Context, modelId: String) {
+        context.dataStore.edit { it[LOCAL_MODEL_ID] = modelId }
+    }
+
     suspend fun setHaptic(context: Context, on: Boolean) {
         context.dataStore.edit { it[HAPTIC] = on }
     }
 
-    /** Add a finished dictation: save to Recent and add its audio seconds to today's usage. */
-    suspend fun addDictation(context: Context, text: String, audioSeconds: Int) {
+    /**
+     * Add a finished dictation: save to Recent and, when [countUsage] is
+     * true, add its audio seconds to today's Groq usage. On-device
+     * dictations pass false — they never consume Groq quota, so the
+     * usage ring shows Groq usage only.
+     */
+    suspend fun addDictation(context: Context, text: String, audioSeconds: Int, countUsage: Boolean = true) {
         val current = context.dataStore.data.first()
         val today = todayString()
         val storedDate = current[USAGE_DATE] ?: ""
@@ -177,8 +196,10 @@ object Store {
         val recent = parseRecent(current[RECENT_JSON] ?: "[]").toMutableList()
         recent.add(0, RecentEntry(System.currentTimeMillis(), text))
         context.dataStore.edit {
-            it[USAGE_DATE] = today
-            it[USAGE_SECONDS] = baseSeconds + audioSeconds.coerceAtLeast(0)
+            if (countUsage) {
+                it[USAGE_DATE] = today
+                it[USAGE_SECONDS] = baseSeconds + audioSeconds.coerceAtLeast(0)
+            }
             it[RECENT_JSON] = recentJson(recent)
         }
     }

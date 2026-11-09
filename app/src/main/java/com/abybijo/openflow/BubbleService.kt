@@ -1,5 +1,6 @@
 package com.abybijo.openflow
 
+import android.animation.Animator
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.app.Notification
@@ -56,6 +57,8 @@ class BubbleService : Service() {
     companion object {
         /** Sent by ReviewActivity when the user taps Insert on a reviewed dictation. */
         const val ACTION_INSERT_REVIEWED = "com.abybijo.openflow.INSERT_REVIEWED"
+        /** Bars in the recording waveform — long enough to read as a voice trace. */
+        private const val WAVE_BAR_COUNT = 11
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -68,7 +71,6 @@ class BubbleService : Service() {
     private var recordingHostPackage: String? = null
     private var state: BubbleState = BubbleState.IDLE
     private var prefs: Prefs = Prefs()
-    private var waveAnimators: List<ObjectAnimator> = emptyList()
     private var wavePollJob: Job? = null
     private var resultResetJob: Job? = null
     private var snapAnimator: ValueAnimator? = null
@@ -78,8 +80,14 @@ class BubbleService : Service() {
     private var waveRow: LinearLayout? = null
     private var waveBars: List<View> = emptyList()
     private var liveDot: View? = null
+    /** Three dots for the transcribing state — deliberately not bars. */
+    private var thinkingRow: LinearLayout? = null
+    private var thinkingDots: List<View> = emptyList()
+    private var thinkingAnimators: List<Animator> = emptyList()
+    /** Drawable alpha from the user's opacity preset; the breathing glow animates around it. */
+    private var bubbleBaseAlpha: Int = 255
     /** Scrolling history of smoothed mic levels, newest on the right. */
-    private var waveLevels = FloatArray(7) { 0.2f }
+    private var waveLevels = FloatArray(WAVE_BAR_COUNT) { 0.2f }
     private var smoothLevel = 0.2f
     private var bubbleBg: GradientDrawable? = null
     private var lastX: Int? = null
@@ -113,7 +121,14 @@ class BubbleService : Service() {
                     newPrefs.bubbleEnabled != prefs.bubbleEnabled
                 prefs = newPrefs
                 when {
-                    firstBuild -> buildBubble()
+                    firstBuild -> {
+                        buildBubble()
+                        // On-device engine: warm the model now, so the
+                        // first dictation after a reboot is fast.
+                        if (newPrefs.engine == "local") {
+                            scope.launch { warmLocalEngine(this@BubbleService, newPrefs.localModelId) }
+                        }
+                    }
                     appearanceChanged && state == BubbleState.IDLE -> rebuildBubble()
                     appearanceChanged -> pendingRebuild = true
                     else -> { /* Non-appearance change: keep the bubble as it is. */ }
@@ -140,6 +155,7 @@ class BubbleService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
+        releaseLocalEngine()
         stopWaveAnimation()
         snapAnimator?.cancel()
         snapAnimator = null
@@ -193,6 +209,7 @@ class BubbleService : Service() {
         bg.cornerRadius = if (prefs.bubbleShape == "pill") sizePx / 2f else sizePx / 2f
         bg.alpha = (prefs.bubbleOpacity * 255 / 100).coerceIn(0, 255)
         bubbleBg = bg
+        bubbleBaseAlpha = bg.alpha
 
         val root = FrameLayout(this)
         root.background = bg
@@ -229,7 +246,7 @@ class BubbleService : Service() {
             visibility = View.GONE
         }
         val bars = mutableListOf<View>()
-        repeat(7) {
+        repeat(WAVE_BAR_COUNT) {
             val bar = View(this).apply {
                 // Rounded caps, like the Compose preview.
                 background = GradientDrawable().apply {
@@ -260,6 +277,34 @@ class BubbleService : Service() {
         dotParams.setMargins(dp(4), 0, 0, 0)
         waveRow?.addView(liveDot, dotParams)
         root.addView(waveRow, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER
+        ))
+        // Thinking dots for the transcribing state. Three dots that bob
+        // and breathe while the words are being worked out — deliberately
+        // not bars, so the two states can never be confused: the bars
+        // mean "I can hear you", the dots mean "I'm thinking".
+        thinkingRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        val dots = mutableListOf<View>()
+        repeat(3) {
+            val dot = View(this).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.WHITE)
+                }
+                alpha = 0.6f
+            }
+            val dotParams = LinearLayout.LayoutParams(dp(8), dp(8))
+            dotParams.setMargins(dp(3), 0, dp(3), 0)
+            thinkingRow?.addView(dot, dotParams)
+            dots.add(dot)
+        }
+        thinkingDots = dots
+        root.addView(thinkingRow, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER
         ))
@@ -397,6 +442,8 @@ class BubbleService : Service() {
         waveRow = null
         waveBars = emptyList()
         liveDot = null
+        thinkingRow = null
+        thinkingDots = emptyList()
         bubbleBg = null
         buildBubble()
     }
@@ -504,8 +551,11 @@ class BubbleService : Service() {
             else -> intArrayOf(colors.first.toInt(), colors.second.toInt())
         }
         bg.colors = stateColors
+        // The recording and transcribing pills are longer (2.6x) so the
+        // eleven-bar waveform and the thinking dots have room to breathe.
         val width = when (state) {
-            BubbleState.RECORDING, BubbleState.TRANSCRIBING, BubbleState.COPIED -> (sizePx * 1.9).toInt()
+            BubbleState.RECORDING, BubbleState.TRANSCRIBING -> (sizePx * 2.6).toInt()
+            BubbleState.COPIED -> (sizePx * 1.9).toInt()
             BubbleState.INSERTED -> sizePx
             BubbleState.IDLE -> if (prefs.bubbleShape == "pill") (sizePx * 1.9).toInt() else sizePx
         }
@@ -526,40 +576,86 @@ class BubbleService : Service() {
             checkIcon?.visibility = View.GONE
         }
         copiedText?.visibility = if (state == BubbleState.COPIED) View.VISIBLE else View.GONE
-        // Waveform: mic-driven while recording, looping while transcribing.
-        val showWave = prefs.showWaveform &&
-            (state == BubbleState.RECORDING || state == BubbleState.TRANSCRIBING)
-        if (showWave) {
-            waveRow?.visibility = View.VISIBLE
-            liveDot?.visibility = if (state == BubbleState.RECORDING) View.VISIBLE else View.GONE
-            startWaveAnimation(micDriven = state == BubbleState.RECORDING)
-        } else {
-            waveRow?.visibility = View.GONE
-            stopWaveAnimation()
+        // Waveform while recording, thinking dots while transcribing.
+        // The bars mean "I can hear you", the dots mean "I'm thinking".
+        when (state) {
+            BubbleState.RECORDING -> {
+                if (prefs.showWaveform) {
+                    waveRow?.visibility = View.VISIBLE
+                    liveDot?.visibility = View.VISIBLE
+                    thinkingRow?.visibility = View.GONE
+                    startMicWavePoll()
+                } else {
+                    waveRow?.visibility = View.GONE
+                    thinkingRow?.visibility = View.GONE
+                    stopWaveAnimation()
+                }
+            }
+            BubbleState.TRANSCRIBING -> {
+                waveRow?.visibility = View.GONE
+                thinkingRow?.visibility = View.VISIBLE
+                startThinkingAnimation()
+            }
+            else -> {
+                waveRow?.visibility = View.GONE
+                thinkingRow?.visibility = View.GONE
+                stopWaveAnimation()
+            }
         }
         bubbleView?.invalidate()
     }
 
-    private fun startWaveAnimation(micDriven: Boolean) {
+    /**
+     * Transcribing, made unmistakable: three dots bobbing up and down
+     * on staggered beats, over a slow breathing glow (~2.4 s cycle)
+     * and a gentle pill pulse in step with it. Nothing here moves like
+     * a bar, so it can never be mistaken for listening.
+     */
+    private fun startThinkingAnimation() {
         stopWaveAnimation()
-        if (micDriven) {
-            startMicWavePoll()
-            return
-        }
-        if (waveRow == null) return
-        // Seven bars on one shared ease-in-out curve, each starting a
-        // fraction later — a smooth wave, not a mechanical tick. Runs
-        // while transcribing.
-        waveAnimators = waveBars.mapIndexed { i, bar ->
-            ObjectAnimator.ofFloat(bar, "scaleY", 0.35f, 1.7f).apply {
-                duration = 650L
-                startDelay = i * 110L
+        val bg = bubbleBg ?: return
+        val view = bubbleView ?: return
+        val dotAnimators = thinkingDots.mapIndexed { i, dot ->
+            ObjectAnimator.ofFloat(dot, "translationY", 0f, -dp(5).toFloat(), 0f).apply {
+                duration = 900L
+                startDelay = i * 180L
+                repeatCount = ValueAnimator.INFINITE
+                interpolator = AccelerateDecelerateInterpolator()
+                start()
+            }
+        } + thinkingDots.mapIndexed { i, dot ->
+            ObjectAnimator.ofFloat(dot, "alpha", 0.45f, 1f).apply {
+                duration = 900L
+                startDelay = i * 180L
                 repeatCount = ValueAnimator.INFINITE
                 repeatMode = ValueAnimator.REVERSE
                 interpolator = AccelerateDecelerateInterpolator()
                 start()
             }
         }
+        val glowAnimator = ObjectAnimator.ofInt(
+            bg, "alpha", (bubbleBaseAlpha * 0.8f).toInt(), bubbleBaseAlpha
+        ).apply {
+            duration = 1200L
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            start()
+        }
+        val pulseX = ObjectAnimator.ofFloat(view, "scaleX", 1f, 1.04f).apply {
+            duration = 1200L
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            interpolator = AccelerateDecelerateInterpolator()
+            start()
+        }
+        val pulseY = ObjectAnimator.ofFloat(view, "scaleY", 1f, 1.04f).apply {
+            duration = 1200L
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            interpolator = AccelerateDecelerateInterpolator()
+            start()
+        }
+        thinkingAnimators = dotAnimators + glowAnimator + pulseX + pulseY
     }
 
     /**
@@ -572,19 +668,31 @@ class BubbleService : Service() {
      * The level array is a primitive FloatArray: nothing is allocated
      * in this loop.
      */
+    /**
+     * Mic-driven waveform: every 55 ms the live level is read and the
+     * bars shift left, newest on the right — a scrolling voice trace,
+     * not a static row. The level is smoothed with a fast attack (jump
+     * straight up, ~one poll) and a slow release (~200 ms decay), so
+     * the bars move fluidly and never jitter. Older bars fade with
+     * age, newest brightest. Bar heights and the dot's brightness are
+     * set directly on the Views — draw-phase properties, no layout,
+     * no recomposition. The level array is a primitive FloatArray:
+     * nothing is allocated in this loop.
+     */
     private fun startMicWavePoll() {
-        wavePollJob?.cancel()
-        waveLevels = FloatArray(7) { 0.2f }
+        stopWaveAnimation()
+        waveLevels = FloatArray(WAVE_BAR_COUNT) { 0.2f }
         smoothLevel = 0.2f
         wavePollJob = scope.launch {
             while (state == BubbleState.RECORDING) {
                 val raw = recorder?.amplitude() ?: 0.2f
                 smoothLevel = if (raw >= smoothLevel) raw
                 else smoothLevel + (raw - smoothLevel) * 0.24f
-                for (i in 0 until 6) waveLevels[i] = waveLevels[i + 1]
-                waveLevels[6] = smoothLevel
+                for (i in 0 until WAVE_BAR_COUNT - 1) waveLevels[i] = waveLevels[i + 1]
+                waveLevels[WAVE_BAR_COUNT - 1] = smoothLevel
                 for (i in waveBars.indices) {
                     waveBars[i].scaleY = 0.35f + waveLevels[i] * 1.35f
+                    waveBars[i].alpha = 0.35f + 0.65f * (i.toFloat() / (WAVE_BAR_COUNT - 1))
                 }
                 liveDot?.alpha = 0.3f + smoothLevel * 0.7f
                 delay(55)
@@ -595,8 +703,11 @@ class BubbleService : Service() {
     private fun stopWaveAnimation() {
         wavePollJob?.cancel()
         wavePollJob = null
-        waveAnimators.forEach { try { it.cancel() } catch (_: Exception) { } }
-        waveAnimators = emptyList()
+        thinkingAnimators.forEach { try { it.cancel() } catch (_: Exception) { } }
+        thinkingAnimators = emptyList()
+        bubbleBg?.alpha = bubbleBaseAlpha
+        bubbleView?.scaleX = 1f
+        bubbleView?.scaleY = 1f
     }
 
     private fun onBubbleTap() {
@@ -609,10 +720,28 @@ class BubbleService : Service() {
     }
 
     private fun startRecording() {
-        val key = KeyStore.getGroqKey(this)
-        if (key.isNullOrBlank()) {
-            Toast.makeText(this, "Add your Groq API key in OpenFlow Settings first.", Toast.LENGTH_LONG).show()
-            return
+        if (prefs.engine == "local") {
+            // On-device needs no key — but it needs a model. Recording
+            // is still allowed without one: the transcribe step falls
+            // back to Groq when a key exists. Only block when there is
+            // no way to transcribe at all.
+            val modelReady = ModelDownloader.isDownloaded(
+                this, ModelCatalog.byId(prefs.localModelId)
+            )
+            if (!modelReady && KeyStore.getGroqKey(this).isNullOrBlank()) {
+                Toast.makeText(
+                    this,
+                    "Download an on-device model in Settings, or add your Groq key.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+        } else {
+            val key = KeyStore.getGroqKey(this)
+            if (key.isNullOrBlank()) {
+                Toast.makeText(this, "Add your Groq API key in OpenFlow Settings first.", Toast.LENGTH_LONG).show()
+                return
+            }
         }
         val file = File(cacheDir, "bubble_recording.wav")
         val rec = WavRecorder()
@@ -636,22 +765,30 @@ class BubbleService : Service() {
             // WAV finalisation (thread join + header write) happens off
             // the main thread: tap-stop must return instantly.
             val seconds = rec.stop(file)
-            val key = KeyStore.getGroqKey(this@BubbleService)
-            if (key.isNullOrBlank()) {
-                withContext(Dispatchers.Main) {
-                    setState(BubbleState.IDLE)
-                    Toast.makeText(this@BubbleService, "No Groq API key saved.", Toast.LENGTH_LONG).show()
+            // The selected engine transcribes; when On-device is picked
+            // but the model is missing or local transcription fails,
+            // Groq is used for this utterance instead — the dictation
+            // is never lost. Only Groq seconds count toward the usage
+            // ring; on-device dictations are free.
+            val (result, usedGroq) = transcribeWithFallback(
+                this@BubbleService,
+                prefs.engine,
+                prefs.localModelId,
+                file,
+                onFallback = { message ->
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@BubbleService, message, Toast.LENGTH_LONG).show()
+                    }
                 }
-                return@launch
-            }
-            when (val result = GroqClient.transcribe(key, file)) {
+            )
+            when (result) {
                 is TranscribeResult.Ok -> {
                     var text = result.text.trim()
                     if (prefs.cleanTranscript) text = cleanTranscript(text)
                     if (prefs.autoPunctuation && text.isNotEmpty() && text.last() !in listOf('.', '!', '?')) {
                         text += "."
                     }
-                    Store.addDictation(this@BubbleService, text, seconds.toInt())
+                    Store.addDictation(this@BubbleService, text, seconds.toInt(), countUsage = usedGroq)
                     val finalText = text
                     withContext(Dispatchers.Main) { handleTranscribedText(finalText) }
                 }
@@ -662,6 +799,13 @@ class BubbleService : Service() {
                 is TranscribeResult.RateLimited -> withContext(Dispatchers.Main) {
                     setState(BubbleState.IDLE)
                     Toast.makeText(this@BubbleService, "Groq daily limit reached — try tomorrow.", Toast.LENGTH_LONG).show()
+                }
+                is TranscribeResult.LocalModelMissing -> withContext(Dispatchers.Main) {
+                    // Unreachable through transcribeWithFallback (it falls
+                    // back to Groq first); kept so the sealed `when` stays
+                    // exhaustive if the routing ever changes.
+                    setState(BubbleState.IDLE)
+                    Toast.makeText(this@BubbleService, "On-device model not downloaded. Download one in Settings.", Toast.LENGTH_LONG).show()
                 }
                 is TranscribeResult.Error -> withContext(Dispatchers.Main) {
                     setState(BubbleState.IDLE)

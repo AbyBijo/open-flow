@@ -1,11 +1,14 @@
 package com.abybijo.openflow
 
 import android.content.Context
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -40,6 +43,108 @@ class MainViewModel(private val context: Context) : ViewModel() {
 
     val hasKey = MutableStateFlow(KeyStore.hasGroqKey(context))
 
+    /** On-disk download state, refreshed from filesDir/models/. */
+    private val diskDownloadStates = MutableStateFlow<Map<String, ModelDownloadState>>(emptyMap())
+
+    /**
+     * Download state per model: the live service state wins over the
+     * on-disk state, so a running download shows its progress and a
+     * finished one shows as downloaded.
+     */
+    val downloadStates: StateFlow<Map<String, ModelDownloadState>> =
+        combine(diskDownloadStates, ModelDownloadStates.flow) { disk, live -> disk + live }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    /** True when the last transcribeFile call actually used Groq (demo usage accounting). */
+    var lastTranscribeUsedGroq: Boolean = true
+        private set
+
+    init {
+        refreshModelStates()
+        // A finished download changes the on-disk truth; re-scan then.
+        viewModelScope.launch {
+            ModelDownloadStates.flow.collect { live ->
+                if (live.values.any { it is ModelDownloadState.Downloaded || it is ModelDownloadState.Failed }) {
+                    refreshModelStates()
+                }
+            }
+        }
+    }
+
+    fun refreshModelStates() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val states = ModelCatalog.all.associate { model ->
+                model.id to if (ModelDownloader.isDownloaded(context, model)) {
+                    ModelDownloadState.Downloaded
+                } else {
+                    val partial = ModelDownloader.partialSize(context, model)
+                    if (partial > 0L) ModelDownloadState.Paused(partial)
+                    else ModelDownloadState.NotDownloaded
+                }
+            }
+            diskDownloadStates.value = states
+        }
+    }
+
+    fun downloadModel(modelId: String) {
+        val model = ModelCatalog.byId(modelId)
+        viewModelScope.launch(Dispatchers.IO) {
+            if (ModelDownloader.isDownloaded(context, model)) {
+                ModelDownloadStates.update(modelId, ModelDownloadState.Downloaded)
+                return@launch
+            }
+            if (!ModelDownloader.hasEnoughSpace(context, model)) {
+                ModelDownloadStates.update(
+                    modelId,
+                    ModelDownloadState.Failed(
+                        "Not enough storage for ${model.name} (${model.sizeMb} MB). Free some space and try again."
+                    )
+                )
+                return@launch
+            }
+            ContextCompat.startForegroundService(
+                context, ModelDownloadService.downloadIntent(context, modelId)
+            )
+        }
+    }
+
+    fun pauseDownload(modelId: String) {
+        context.startService(ModelDownloadService.pauseIntent(context))
+    }
+
+    fun cancelDownload(modelId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            context.startService(ModelDownloadService.cancelIntent(context))
+            ModelDownloader.deletePartial(context, ModelCatalog.byId(modelId))
+            ModelDownloadStates.update(modelId, ModelDownloadState.NotDownloaded)
+            refreshModelStates()
+        }
+    }
+
+    fun deleteModel(modelId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            ModelDownloader.deleteModel(context, ModelCatalog.byId(modelId))
+            ModelDownloadStates.update(modelId, ModelDownloadState.NotDownloaded)
+            refreshModelStates()
+        }
+    }
+
+    fun setEngine(engine: String) {
+        if (engine != "local") releaseLocalEngine()
+        viewModelScope.launch { Store.setEngine(context, engine) }
+        if (engine == "local") {
+            // Warm the selected model in the background, so the first
+            // on-device dictation does not pay the load cost.
+            viewModelScope.launch { warmLocalEngine(context, prefs.value.localModelId) }
+        }
+    }
+
+    fun setLocalModel(modelId: String) {
+        releaseLocalEngine()
+        viewModelScope.launch { Store.setLocalModelId(context, modelId) }
+        viewModelScope.launch { warmLocalEngine(context, modelId) }
+    }
+
     fun refreshKeyState() {
         hasKey.value = KeyStore.hasGroqKey(context)
     }
@@ -67,9 +172,9 @@ class MainViewModel(private val context: Context) : ViewModel() {
     }
 
     /** Apply auto-punctuation, then record the dictation in Recent + today's usage. */
-    fun recordDictation(rawText: String, audioSeconds: Int) {
+    fun recordDictation(rawText: String, audioSeconds: Int, countUsage: Boolean = true) {
         val text = applyPunctuation(rawText)
-        viewModelScope.launch { Store.addDictation(context, text, audioSeconds) }
+        viewModelScope.launch { Store.addDictation(context, text, audioSeconds, countUsage) }
     }
 
     fun applyPunctuation(text: String): String {
@@ -79,10 +184,12 @@ class MainViewModel(private val context: Context) : ViewModel() {
         return if (trimmed.last() in listOf('.', '!', '?')) trimmed else "$trimmed."
     }
 
-    /** Transcribe a finished WAV file with the stored key. */
+    /** Transcribe a finished WAV file with the selected engine (Groq or on-device). */
     suspend fun transcribeFile(wavFile: File): TranscribeResult {
-        val key = KeyStore.getGroqKey(context)
-            ?: return TranscribeResult.Error("No Groq API key saved. Add one in Settings.")
-        return GroqClient.transcribe(key, wavFile)
+        val (result, usedGroq) = transcribeWithFallback(
+            context, prefs.value.engine, prefs.value.localModelId, wavFile
+        )
+        lastTranscribeUsedGroq = usedGroq
+        return result
     }
 }

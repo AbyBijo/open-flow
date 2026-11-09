@@ -49,6 +49,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -1277,7 +1278,9 @@ fun SettingsContent(
     onChangeKey: () -> Unit
 ) {
     var previewRecording by remember { mutableStateOf(false) }
+    var previewTranscribing by remember { mutableStateOf(false) }
     var previewResult by remember { mutableStateOf(BubblePreviewResult.NONE) }
+    val downloadStates by vm.downloadStates.collectAsState()
     // A tap restarts the sequence; the run id stops an older sequence
     // from overwriting the new one after its delays.
     var previewRun by remember { mutableStateOf(0) }
@@ -1301,11 +1304,16 @@ fun SettingsContent(
                             val run = previewRun + 1
                             previewRun = run
                             previewRecording = true
+                            previewTranscribing = false
                             previewResult = BubblePreviewResult.NONE
                             scope.launch {
                                 delay(1500)
                                 if (previewRun != run) return@launch
                                 previewRecording = false
+                                previewTranscribing = true
+                                delay(1800)
+                                if (previewRun != run) return@launch
+                                previewTranscribing = false
                                 previewResult = BubblePreviewResult.INSERTED
                                 delay(600)
                                 if (previewRun != run) return@launch
@@ -1317,7 +1325,7 @@ fun SettingsContent(
                         },
                     contentAlignment = Alignment.Center
                 ) {
-                    BubblePreview(prefs = prefs, recording = previewRecording, result = previewResult)
+                    BubblePreview(prefs = prefs, recording = previewRecording, result = previewResult, transcribing = previewTranscribing)
                 }
                 Text(
                     "Tap to preview", fontSize = 14.sp,
@@ -1449,7 +1457,48 @@ fun SettingsContent(
                 )
             }
         }
-        AnimItem(6) {
+        AnimItem(6) { SectionLabel("Transcription engine") }
+        AnimItem(7) {
+            AppCard {
+                Text("Engine", fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                SegmentedControl(
+                    options = listOf("Cloud (Groq)", "On-device"),
+                    selected = if (prefs.engine == "local") 1 else 0,
+                    onSelect = { vm.setEngine(if (it == 1) "local" else "groq") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    engineStatusText(prefs, downloadStates),
+                    fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                )
+                if (prefs.engine == "local") {
+                    Spacer(Modifier.height(12.dp))
+                    Text("Models", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Spacer(Modifier.height(6.dp))
+                    ModelCatalog.all.forEach { model ->
+                        val state = downloadStates[model.id] ?: ModelDownloadState.NotDownloaded
+                        ModelRow(
+                            model = model,
+                            state = state,
+                            selected = prefs.localModelId == model.id,
+                            onSelect = { vm.setLocalModel(model.id) },
+                            onDownload = { vm.downloadModel(model.id) },
+                            onPause = { vm.pauseDownload(model.id) },
+                            onCancel = { vm.cancelDownload(model.id) },
+                            onDelete = { vm.deleteModel(model.id) }
+                        )
+                        Spacer(Modifier.height(10.dp))
+                    }
+                    Text(
+                        "Models download once and live on this phone only. On-device dictation works offline and never uses Groq quota.",
+                        fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                    )
+                }
+            }
+        }
+        AnimItem(8) {
             AppCard {
                 Text("Accessibility", fontWeight = FontWeight.Bold)
                 Text(
@@ -1480,8 +1529,8 @@ fun SettingsContent(
                 )
             }
         }
-        AnimItem(7) { SectionLabel("Appearance") }
-        AnimItem(8) {
+        AnimItem(9) { SectionLabel("Appearance") }
+        AnimItem(10) {
             AppCard {
                 Text("Theme", fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
@@ -1500,11 +1549,11 @@ fun SettingsContent(
                 )
             }
         }
-        AnimItem(9) {
+        AnimItem(11) {
             AppCard(onClick = onAbout) {
                 Text("About OpenFlow", fontWeight = FontWeight.Bold)
                 Text(
-                    "Free, always. Audio is processed by Groq. We never see or store it.",
+                    "Free, always. Audio is processed by Groq or on your device. We never see or store it.",
                     fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
                 )
             }
@@ -1565,14 +1614,157 @@ fun SegmentedControl(options: List<String>, selected: Int, onSelect: (Int) -> Un
 /** Result states the bubble preview can show after a dictation. */
 enum class BubblePreviewResult { NONE, INSERTED, COPIED }
 
+/** One row in the Settings model list: name, size, state, and its action. */
 @Composable
-fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult = BubblePreviewResult.NONE) {
+private fun ModelRow(
+    model: WhisperModel,
+    state: ModelDownloadState,
+    selected: Boolean,
+    onSelect: () -> Unit,
+    onDownload: () -> Unit,
+    onPause: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.background)
+            .clickable(enabled = state is ModelDownloadState.Downloaded) { onSelect() }
+            .padding(12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(model.name, fontWeight = FontWeight.SemiBold)
+                    if (selected) {
+                        Text(
+                            "  ·  In use",
+                            fontSize = 13.sp, color = Accent, fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+                Text(
+                    "${model.sizeMb} MB · ${model.blurb}",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                )
+            }
+            when (state) {
+                is ModelDownloadState.NotDownloaded -> ModelAction(text = "Download", onClick = onDownload)
+                is ModelDownloadState.Downloading -> ModelAction(text = "Pause", onClick = onPause)
+                is ModelDownloadState.Paused -> {
+                    ModelAction(text = "Resume", onClick = onDownload)
+                    Spacer(Modifier.width(12.dp))
+                    ModelAction(text = "Cancel", onClick = onCancel)
+                }
+                is ModelDownloadState.Downloaded -> {
+                    if (!selected) ModelAction(text = "Delete", onClick = onDelete)
+                }
+                is ModelDownloadState.Failed -> ModelAction(text = "Retry", onClick = onDownload)
+            }
+        }
+        when (state) {
+            is ModelDownloadState.Downloading -> {
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = state.fraction,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "${(state.fraction * 100).toInt()}%",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+            is ModelDownloadState.Paused -> {
+                Text(
+                    "Paused — ${state.partialBytes / (1024 * 1024)} MB downloaded",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+            is ModelDownloadState.Failed -> {
+                Text(
+                    state.message,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+            else -> { }
+        }
+    }
+}
+
+@Composable
+private fun ModelAction(text: String, onClick: () -> Unit) {
+    Text(
+        text, color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+        modifier = Modifier.clickable { onClick() }.padding(4.dp)
+    )
+}
+
+/** Status card line under the engine switcher: what is active right now. */
+private fun engineStatusText(prefs: Prefs, downloadStates: Map<String, ModelDownloadState>): String {
+    if (prefs.engine != "local") {
+        return "Active: Cloud (Groq) — whisper-large-v3-turbo with your key."
+    }
+    val model = ModelCatalog.byId(prefs.localModelId)
+    return when (downloadStates[model.id]) {
+        ModelDownloadState.Downloaded ->
+            "Active: On-device · ${model.name} (downloaded, ready offline)."
+        is ModelDownloadState.Downloading ->
+            "Active: On-device · ${model.name} (still downloading — Groq covers dictation until it lands)."
+        is ModelDownloadState.Paused ->
+            "Active: On-device · ${model.name} (download paused — Groq covers dictation until it lands)."
+        else ->
+            "Active: On-device · ${model.name} (not downloaded yet — Groq covers dictation until it lands)."
+    }
+}
+
+@Composable
+fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult = BubblePreviewResult.NONE, transcribing: Boolean = false) {
     val colors = BUBBLE_COLORS[prefs.bubbleColor]
     val size = prefs.bubbleSize.dp
-    val width = if (prefs.bubbleShape == "pill" || recording || result == BubblePreviewResult.COPIED) size * 1.9f else size
+    // The listening and thinking pills are longer (2.6x) so the
+    // eleven-bar trace and the thinking dots have room to breathe.
+    val width = when {
+        recording || transcribing -> size * 2.6f
+        result == BubblePreviewResult.COPIED || prefs.bubbleShape == "pill" -> size * 1.9f
+        else -> size
+    }
+    // Breathing glow + gentle pulse while thinking, on a ~2.4 s cycle.
+    // The values are only read when transcribing, so the animation
+    // costs nothing in the other states.
+    val glowTransition = rememberInfiniteTransition(label = "thinkingGlow")
+    val glowAlpha by glowTransition.animateFloat(
+        initialValue = 0.82f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "glowAlpha"
+    )
+    val pulse by glowTransition.animateFloat(
+        initialValue = 1f, targetValue = 1.04f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse"
+    )
     Box(
         modifier = Modifier
             .size(width, size)
+            .graphicsLayer {
+                alpha = if (transcribing) glowAlpha else 1f
+                scaleX = if (transcribing) pulse else 1f
+                scaleY = if (transcribing) pulse else 1f
+            }
             .clip(RoundedCornerShape(size / 2))
             .background(
                 if (recording) Brush.linearGradient(listOf(Red, Red))
@@ -1589,13 +1781,46 @@ fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult 
             )
         } else if (result == BubblePreviewResult.COPIED) {
             Text("Copied", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        } else if (transcribing) {
+            // Thinking dots: three dots bobbing on staggered beats.
+            // Deliberately not bars — the bars mean "I can hear you",
+            // the dots mean "I'm thinking".
+            val transition = rememberInfiniteTransition(label = "thinking")
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                (0..2).forEach { i ->
+                    val offset by transition.animateFloat(
+                        initialValue = 0f,
+                        targetValue = -6f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(durationMillis = 900, delayMillis = i * 180, easing = FastOutSlowInEasing),
+                            repeatMode = RepeatMode.Reverse
+                        ),
+                        label = "dotOffset$i"
+                    )
+                    val dotAlpha by transition.animateFloat(
+                        initialValue = 0.45f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(durationMillis = 900, delayMillis = i * 180, easing = FastOutSlowInEasing),
+                            repeatMode = RepeatMode.Reverse
+                        ),
+                        label = "dotAlpha$i"
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .offset(y = offset.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color.White.copy(alpha = dotAlpha))
+                    )
+                }
+            }
         } else if (recording && prefs.showWaveform) {
-            // Animated waveform: seven bars breathing on staggered phases
-            // with an ease-in-out curve, so the recording state moves
-            // smoothly instead of ticking mechanically.
+            // Eleven-bar voice trace: newest bar brightest, older bars
+            // fading with age as they scroll left.
             val transition = rememberInfiniteTransition(label = "waveform")
             Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
-                listOf(6, 12, 20, 26, 20, 12, 6).forEachIndexed { i, h ->
+                listOf(6, 9, 12, 16, 20, 24, 26, 24, 20, 16, 12).forEachIndexed { i, h ->
                     val scale by transition.animateFloat(
                         initialValue = 0.45f,
                         targetValue = 1.6f,
@@ -1610,7 +1835,7 @@ fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult 
                             .width(4.dp)
                             .height((h * scale).dp)
                             .clip(RoundedCornerShape(2.dp))
-                            .background(Color.White)
+                            .background(Color.White.copy(alpha = 0.35f + 0.65f * (i / 10f)))
                     )
                 }
             }
@@ -1710,7 +1935,7 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
                                                     fieldText = text.substring(0, i + 1)
                                                     delay(26)
                                                 }
-                                                vm.recordDictation(result.text, seconds.toInt())
+                                                vm.recordDictation(result.text, seconds.toInt(), vm.lastTranscribeUsedGroq)
                                                 bubbleState = 0
                                                 fieldHint = "Type a message"
                                             }
@@ -1738,7 +1963,8 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
                     ) {
                         BubblePreview(
                             prefs = prefs,
-                            recording = bubbleState == 1 || bubbleState == 2
+                            recording = bubbleState == 1,
+                            transcribing = bubbleState == 2
                         )
                     }
                 }
@@ -1786,12 +2012,12 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
                     contentScale = ContentScale.Crop
                 )
                 Text("About OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp))
-                Text("Version 2.2.0", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                Text("Version 2.3.0", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
             }
         }
         AnimItem(2) {
             AppCard {
-                Text("Free, always. Audio is processed by Groq. We never see or store it.", fontSize = 16.sp)
+                Text("Free, always. Audio is processed by Groq or on your device. We never see or store it.", fontSize = 16.sp)
                 Spacer(Modifier.height(8.dp))
                 Text(
                     "OpenFlow is a free, open-source voice dictation app. Speak in any app with the floating bubble, and your words appear as text — powered by your own free Groq API key. No account, no ads, no subscription.",
