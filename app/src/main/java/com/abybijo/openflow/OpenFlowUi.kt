@@ -7,6 +7,12 @@ import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -34,6 +40,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -83,6 +98,10 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -140,14 +159,40 @@ fun OpenFlowTheme(isDark: Boolean, content: @Composable () -> Unit) {
 
 // ---------- Shared components ----------
 
+/** False when the user turned system animations off (Remove animations / animator scale 0). */
+@Composable
+private fun rememberAnimationsEnabled(): Boolean {
+    val context = LocalContext.current
+    return remember {
+        try {
+            Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f
+        } catch (e: Exception) {
+            true
+        }
+    }
+}
+
+/**
+ * Staggered entrance. The transition state starts hidden and flips to
+ * visible on first composition, so the fade + slide really plays (a plain
+ * visible = true never animates on first composition). Content is wrapped
+ * in a Column so items with several children (a spacer and a card, a
+ * heading and its text) stack instead of overlapping.
+ */
 @Composable
 fun ColumnScope.AnimItem(index: Int, content: @Composable () -> Unit) {
+    val animationsOn = rememberAnimationsEnabled()
+    val state = remember { MutableTransitionState(!animationsOn).apply { targetState = true } }
+    val delay = minOf(index, 12) * 45
     AnimatedVisibility(
-        visible = true,
-        enter = fadeIn(tween(300, delayMillis = index * 55)) +
-            slideInVertically(tween(300, delayMillis = index * 55)) { it / 3 }
+        visibleState = state,
+        enter = if (animationsOn) {
+            fadeIn(tween(340, delayMillis = delay, easing = FastOutSlowInEasing)) +
+                slideInVertically(tween(340, delayMillis = delay, easing = FastOutSlowInEasing)) { it / 5 }
+        } else EnterTransition.None,
+        exit = ExitTransition.None
     ) {
-        content()
+        Column { content() }
     }
 }
 
@@ -168,7 +213,7 @@ fun GradientButton(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(56.dp)
+            .heightIn(min = 56.dp)
             .graphicsLayer {
                 alpha = if (enabled) 1f else 0.35f
                 scaleX = pressScale
@@ -179,11 +224,11 @@ fun GradientButton(
                 Brush.linearGradient(listOf(Accent, Accent2)),
                 RoundedCornerShape(18.dp)
             )
-            .clickable(interactionSource = interactionSource, indication = null, enabled = enabled, onClick = onClick),
+            .clickable(interactionSource = interactionSource, indication = null, enabled = enabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(text, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text(text, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
             if (iconRes != null) {
                 Spacer(Modifier.width(8.dp))
                 Image(
@@ -210,7 +255,7 @@ fun GhostButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier
     )
     Box(
         modifier = modifier
-            .height(56.dp)
+            .heightIn(min = 56.dp)
             .graphicsLayer {
                 scaleX = pressScale
                 scaleY = pressScale
@@ -218,7 +263,7 @@ fun GhostButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier
             .clip(RoundedCornerShape(18.dp))
             .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(18.dp))
             .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(18.dp))
-            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick),
+            .clickable(interactionSource = interactionSource, indication = null, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -231,7 +276,8 @@ fun GhostButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier
                 Spacer(Modifier.width(8.dp))
                 Image(
                     painter = painterResource(iconRes), contentDescription = null,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(20.dp),
+                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(MaterialTheme.colorScheme.onSurface)
                 )
             }
         }
@@ -240,14 +286,27 @@ fun GhostButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier
 
 @Composable
 fun AppCard(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-        onClick = { onClick?.invoke() }
-    ) {
-        Column(modifier = Modifier.padding(18.dp), content = content)
+    val shape = RoundedCornerShape(24.dp)
+    val border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+    if (onClick != null) {
+        Surface(
+            modifier = modifier.padding(vertical = 6.dp).fillMaxWidth(),
+            shape = shape,
+            color = MaterialTheme.colorScheme.surface,
+            border = border,
+            onClick = onClick
+        ) {
+            Column(modifier = Modifier.padding(18.dp), content = content)
+        }
+    } else {
+        Surface(
+            modifier = modifier.padding(vertical = 6.dp).fillMaxWidth(),
+            shape = shape,
+            color = MaterialTheme.colorScheme.surface,
+            border = border
+        ) {
+            Column(modifier = Modifier.padding(18.dp), content = content)
+        }
     }
 }
 
@@ -320,19 +379,33 @@ fun ProgressDots(current: Int, total: Int = 5) {
 
 @Composable
 fun UsageRing(percent: Int, size: Dp = 84.dp) {
-    Box(modifier = Modifier.size(size), contentAlignment = Alignment.Center) {
+    val track = MaterialTheme.colorScheme.surfaceVariant
+    val sweep by animateFloatAsState(
+        targetValue = 360f * (percent.coerceIn(0, 100) / 100f),
+        animationSpec = tween(900, easing = FastOutSlowInEasing), label = "usageRing"
+    )
+    Box(
+        modifier = Modifier
+            .size(size)
+            .semantics(mergeDescendants = true) {
+                contentDescription = "$percent percent of today’s free dictation used"
+            },
+        contentAlignment = Alignment.Center
+    ) {
         Canvas(modifier = Modifier.size(size)) {
             val stroke = 8.dp.toPx()
             drawArc(
-                color = Color(0xFFE8E8F1),
+                color = track,
                 startAngle = -90f, sweepAngle = 360f, useCenter = false,
                 style = Stroke(width = stroke, cap = StrokeCap.Round)
             )
-            drawArc(
-                color = Accent,
-                startAngle = -90f, sweepAngle = 360f * (percent / 100f), useCenter = false,
-                style = Stroke(width = stroke, cap = StrokeCap.Round)
-            )
+            if (sweep > 0f) {
+                drawArc(
+                    color = Accent,
+                    startAngle = -90f, sweepAngle = sweep, useCenter = false,
+                    style = Stroke(width = stroke, cap = StrokeCap.Round)
+                )
+            }
         }
         Text("$percent%", fontSize = 15.sp, fontWeight = FontWeight.Bold)
     }
@@ -442,9 +515,14 @@ fun OpenFlowApp(
             // back slides it in from the left.
             AnimatedContent(
                 targetState = route,
+                modifier = Modifier.windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal)),
                 transitionSpec = {
                     val forward = routeDepth(targetState) > routeDepth(initialState)
-                    if (forward) {
+                    if (isTabRoute(initialState) && isTabRoute(targetState)) {
+                        // Home <-> Settings: a calm cross-fade, no sideways slide.
+                        fadeIn(tween(240, delayMillis = 60, easing = FastOutSlowInEasing)) togetherWith
+                            fadeOut(tween(120, easing = FastOutSlowInEasing))
+                    } else if (forward) {
                         (slideInHorizontally(animationSpec = tween(280, easing = FastOutSlowInEasing)) { it } + fadeIn(tween(280, easing = FastOutSlowInEasing))) togetherWith
                             (slideOutHorizontally(animationSpec = tween(280, easing = FastOutSlowInEasing)) { -it } + fadeOut(tween(280, easing = FastOutSlowInEasing)))
                     } else {
@@ -505,6 +583,8 @@ fun OpenFlowApp(
                 Route.ChangeKey -> Column(
                     modifier = Modifier
                         .fillMaxSize()
+                        .wrapContentWidth(Alignment.CenterHorizontally)
+                        .widthIn(max = 560.dp)
                         .statusBarsPadding()
                         .navigationBarsPadding()
                         .imePadding()
@@ -556,6 +636,8 @@ private val routeStateSaver: Saver<MutableState<Route>, String> = Saver(
     save = { state -> encodeRoute(state.value) },
     restore = { encoded -> mutableStateOf(decodeRoute(encoded)) }
 )
+
+private fun isTabRoute(route: Route): Boolean = route == Route.Home || route == Route.Settings
 
 /** Deeper in the app = higher number. Used to pick the slide direction. */
 private fun routeDepth(route: Route): Int = when (route) {
@@ -618,6 +700,8 @@ fun OnboardingScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .wrapContentWidth(Alignment.CenterHorizontally)
+            .widthIn(max = 560.dp)
             .statusBarsPadding()
             .navigationBarsPadding()
             .imePadding()
@@ -991,25 +1075,13 @@ fun PermissionsStep(
                             Text(
                                 if (a11yGranted) "Accessibility is on" else "Open Accessibility Settings",
                                 color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
-                                modifier = Modifier.clickable { onOpenA11ySettings() }
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .clickable(role = Role.Button) { onOpenA11ySettings() }
+                                    .padding(top = 14.dp)
                             )
                             if (!a11yGranted) {
-                                Spacer(Modifier.height(10.dp))
-                                Text(
-                                    "If Android shows “Controlled by restricted setting” for OpenFlow, it is because the app was installed directly (not from the Play Store). Fix it in one minute:",
-                                    fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                                )
-                                Spacer(Modifier.height(6.dp))
-                                Text(
-                                    "1. Open App info below.\n2. Tap the ⋮ menu at the top right.\n3. Tap “Allow restricted settings”.\n4. Come back and open Accessibility Settings.",
-                                    fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                                )
-                                Spacer(Modifier.height(8.dp))
-                                Text(
-                                    "Open App info",
-                                    color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
-                                    modifier = Modifier.clickable { onOpenAppInfo() }
-                                )
+                                RestrictedSettingsHelp(onOpenAppInfo = onOpenAppInfo)
                             }
                         }
                     }
@@ -1038,7 +1110,7 @@ fun PermissionsStep(
 fun PermissionRow(iconRes: Int, title: String, subtitle: String, granted: Boolean, onClick: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.padding(vertical = 13.dp).clickable(onClick = onClick)
+        modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Button, onClick = onClick).padding(vertical = 13.dp)
     ) {
         IconTile(iconRes)
         Spacer(Modifier.width(14.dp))
@@ -1079,7 +1151,15 @@ fun MainScreen(
 ) {
     val context = LocalContext.current
     Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
-        Box(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(22.dp)) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .wrapContentWidth(Alignment.CenterHorizontally)
+                .widthIn(max = 640.dp)
+                .padding(22.dp)
+        ) {
             if (tab == 0) {
                 HomeContent(vm, prefs, onDemo, onCopyText, onStartBubble, onStopBubble, onToast, a11yGranted, onOpenA11ySettings, onOpenAppInfo)
             } else {
@@ -1109,30 +1189,113 @@ fun MainScreen(
 
 @Composable
 fun BottomTab(label: String, iconRes: Int, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val isSelected = selected
+    val pressScale by animateFloatAsState(
+        targetValue = if (pressed) 0.92f else 1f,
+        animationSpec = tween(140), label = "tabPress"
+    )
+    val pill by animateColorAsState(
+        targetValue = if (isSelected) Accent.copy(alpha = 0.18f) else Color.Transparent,
+        animationSpec = tween(240), label = "tabPill"
+    )
+    val tint by animateColorAsState(
+        targetValue = if (isSelected) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+        animationSpec = tween(240), label = "tabTint"
+    )
+    val labelColor by animateColorAsState(
+        targetValue = if (isSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+        animationSpec = tween(240), label = "tabLabel"
+    )
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = modifier.clickable(onClick = onClick)
+        modifier = modifier
+            .heightIn(min = 56.dp)
+            .semantics { this.selected = isSelected }
+            .clickable(interactionSource = interactionSource, indication = null, role = Role.Tab, onClick = onClick)
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
     ) {
         Box(
             modifier = Modifier
                 .size(64.dp, 32.dp)
                 .clip(RoundedCornerShape(16.dp))
-                .background(if (selected) Accent.copy(alpha = 0.18f) else Color.Transparent),
+                .background(pill),
             contentAlignment = Alignment.Center
         ) {
             Image(
                 painter = painterResource(iconRes), contentDescription = null,
                 modifier = Modifier.size(24.dp),
-                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(
-                    if (selected) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(tint)
             )
         }
+        Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = labelColor)
+    }
+}
+
+/**
+ * Help for "Controlled by restricted setting". Collapsed by default so it
+ * never clutters the screen; covers phones that have no three-dot menu in
+ * App info (some Samsung models) and a no-Accessibility fallback.
+ */
+@Composable
+fun RestrictedSettingsHelp(onOpenAppInfo: () -> Unit) {
+    val packageName = LocalContext.current.packageName
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val muted = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+    Column(modifier = Modifier.fillMaxWidth()) {
         Text(
-            label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-            color = if (selected) MaterialTheme.colorScheme.onSurface
-            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            if (expanded) "Hide help" else "Can’t switch it on?",
+            color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+            modifier = Modifier
+                .heightIn(min = 48.dp)
+                .clickable(role = Role.Button) { expanded = !expanded }
+                .padding(vertical = 14.dp)
         )
+        AnimatedVisibility(
+            visible = expanded,
+            enter = fadeIn(tween(200)) + expandVertically(tween(280, easing = FastOutSlowInEasing)),
+            exit = fadeOut(tween(140)) + shrinkVertically(tween(220, easing = FastOutSlowInEasing))
+        ) {
+            Column {
+                Text(
+                    "Android blocks this switch for apps installed from outside the Play Store. Follow the option that matches your phone.",
+                    fontSize = 14.sp, color = muted
+                )
+                Text("If App info shows a ⋮ menu", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, modifier = Modifier.padding(top = 12.dp))
+                Text(
+                    "1. Open App info below.\n2. Tap the ⋮ menu at the top right.\n3. Tap “Allow restricted settings”.\n4. Switch OpenFlow on in Accessibility.",
+                    fontSize = 14.sp, color = muted
+                )
+                Text("If there is no ⋮ menu", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, modifier = Modifier.padding(top = 12.dp))
+                Text(
+                    "1. Open Accessibility Settings and try to switch OpenFlow on once, then come back. On many phones the menu only appears after that first attempt.\n2. Open App info again and look for the ⋮ menu.\n3. Still missing? Run this once from a computer with USB debugging on (it is the same as “Allow restricted settings”):",
+                    fontSize = 14.sp, color = muted
+                )
+                SelectionContainer {
+                    Text(
+                        "adb shell appops set $packageName ACCESS_RESTRICTED_SETTINGS allow",
+                        fontSize = 13.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        modifier = Modifier
+                            .padding(top = 8.dp)
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.background)
+                            .padding(12.dp)
+                    )
+                }
+                Text(
+                    "Prefer to skip it? Dictation still works: the text is copied, and you paste it with a long-press in the field.",
+                    fontSize = 14.sp, color = muted, modifier = Modifier.padding(top = 12.dp)
+                )
+                Spacer(Modifier.height(12.dp))
+                GhostButton(text = "Open App info", onClick = onOpenAppInfo, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(4.dp))
+            }
+        }
     }
 }
 
@@ -1169,15 +1332,20 @@ fun HomeContent(
             AnimItem(1) {
                 Spacer(Modifier.height(18.dp))
                 AppCard {
-                    Text("Paste at cursor is off", fontWeight = FontWeight.Bold)
-                    Text(
-                        "Dictation copies to the clipboard until OpenFlow is switched on in Accessibility. Because the app was installed directly (not from the Play Store), Android first blocks that switch — allow it in App info, then switch OpenFlow on:\n\n1. Open App info below.\n2. Tap the ⋮ menu at the top right.\n3. Tap “Allow restricted settings”.\n4. Come back and open Accessibility Settings.",
-                        fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                        modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
-                    )
-                    GradientButton(text = "Open App info", onClick = onOpenAppInfo)
-                    Spacer(Modifier.height(8.dp))
-                    GhostButton(text = "Open Accessibility Settings", onClick = onOpenA11ySettings, modifier = Modifier.fillMaxWidth())
+                    Row(verticalAlignment = Alignment.Top) {
+                        IconTile(R.drawable.ic_info)
+                        Spacer(Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Paste at cursor is off", fontWeight = FontWeight.Bold)
+                            Text(
+                                "Dictation is copied to the clipboard until OpenFlow is switched on in Accessibility. That switch is what lets text land directly in any app’s text field.",
+                                fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                                modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
+                            )
+                            GradientButton(text = "Open Accessibility Settings", onClick = onOpenA11ySettings)
+                            RestrictedSettingsHelp(onOpenAppInfo = onOpenAppInfo)
+                        }
+                    }
                 }
             }
         }
@@ -1354,20 +1522,31 @@ fun SettingsContent(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text("Color", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.padding(vertical = 6.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(vertical = 2.dp)) {
                     BUBBLE_COLORS.forEachIndexed { i, colors ->
+                        val chosen = prefs.bubbleColor == i
                         Box(
                             modifier = Modifier
-                                .size(38.dp)
-                                .clip(RoundedCornerShape(19.dp))
-                                .background(Brush.linearGradient(listOf(Color(colors.first), Color(colors.second))))
-                                .border(
-                                    if (prefs.bubbleColor == i) 3.dp else 0.dp,
-                                    if (prefs.bubbleColor == i) MaterialTheme.colorScheme.onSurface else Color.Transparent,
-                                    RoundedCornerShape(19.dp)
-                                )
-                                .clickable { vm.setBubbleColor(i) }
-                        )
+                                .size(48.dp)
+                                .semantics {
+                                    contentDescription = "Bubble color ${i + 1} of ${BUBBLE_COLORS.size}"
+                                    this.selected = chosen
+                                }
+                                .clickable(role = Role.RadioButton) { vm.setBubbleColor(i) },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(RoundedCornerShape(19.dp))
+                                    .background(Brush.linearGradient(listOf(Color(colors.first), Color(colors.second))))
+                                    .border(
+                                        if (chosen) 3.dp else 0.dp,
+                                        if (chosen) MaterialTheme.colorScheme.onSurface else Color.Transparent,
+                                        RoundedCornerShape(19.dp)
+                                    )
+                            )
+                        }
                     }
                 }
                 // Shape: label above the control, so the label can never be
@@ -1503,29 +1682,28 @@ fun SettingsContent(
             AppCard {
                 Text("Accessibility", fontWeight = FontWeight.Bold)
                 Text(
-                    "This is what lets dictated text land at the cursor in other apps. If Android shows “Controlled by restricted setting” for OpenFlow, open App info, tap the ⋮ menu, tap “Allow restricted settings”, then enable OpenFlow in Accessibility Settings.",
-                    fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                    "Lets OpenFlow insert dictated text at the cursor in any app. Without it, text is copied to the clipboard instead.",
+                    fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                     modifier = Modifier.padding(top = 4.dp)
                 )
-                Spacer(Modifier.height(8.dp))
                 Text(
-                    "Open App info",
+                    "Open Accessibility Settings",
                     color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
-                    modifier = Modifier.clickable {
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .clickable(role = Role.Button) {
+                            context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                        }
+                        .padding(top = 14.dp)
+                )
+                RestrictedSettingsHelp(
+                    onOpenAppInfo = {
                         context.startActivity(
                             Intent(
                                 Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                                 Uri.parse("package:${context.packageName}")
                             )
                         )
-                    }
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Open Accessibility Settings",
-                    color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
-                    modifier = Modifier.clickable {
-                        context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                     }
                 )
             }
@@ -1593,19 +1771,30 @@ fun SegmentedControl(options: List<String>, selected: Int, onSelect: (Int) -> Un
             .padding(3.dp)
     ) {
         options.forEachIndexed { i, label ->
+            val isSelected = i == selected
+            val thumb by animateColorAsState(
+                targetValue = if (isSelected) MaterialTheme.colorScheme.surface else Color.Transparent,
+                animationSpec = tween(220), label = "segThumb"
+            )
+            val textColor by animateColorAsState(
+                targetValue = if (isSelected) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                animationSpec = tween(220), label = "segText"
+            )
             Box(
                 modifier = Modifier
                     .weight(1f)
+                    .heightIn(min = 44.dp)
                     .clip(RoundedCornerShape(11.dp))
-                    .background(if (i == selected) MaterialTheme.colorScheme.surface else Color.Transparent)
-                    .clickable { onSelect(i) }
-                    .padding(vertical = 8.dp),
+                    .background(thumb)
+                    .semantics { this.selected = isSelected }
+                    .clickable(role = Role.Tab) { onSelect(i) },
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                    color = if (i == selected) MaterialTheme.colorScheme.onSurface
-                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = textColor,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
                 )
             }
         }
@@ -1817,11 +2006,11 @@ fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult 
                 }
             }
         } else if (recording && prefs.showWaveform) {
-            // Eleven-bar voice trace: newest bar brightest, older bars
+            // Seven-bar voice trace, tall: newest bar brightest, older bars
             // fading with age as they scroll left.
             val transition = rememberInfiniteTransition(label = "waveform")
             Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
-                listOf(6, 9, 12, 16, 20, 24, 26, 24, 20, 16, 12).forEachIndexed { i, h ->
+                listOf(10, 15, 20, 28, 20, 15, 10).forEachIndexed { i, h ->
                     val scale by transition.animateFloat(
                         initialValue = 0.45f,
                         targetValue = 1.6f,
@@ -2000,12 +2189,12 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
 
 @Composable
 fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
-    Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(22.dp)) {
+    Column(modifier = Modifier.fillMaxSize().wrapContentWidth(Alignment.CenterHorizontally).widthIn(max = 640.dp).statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(22.dp)) {
         AnimItem(0) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "Back", color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 16.sp,
-                    modifier = Modifier.clickable { onBack() }.padding(4.dp)
+                    modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Button, onClick = onBack).padding(horizontal = 4.dp, vertical = 12.dp)
                 )
             }
         }
@@ -2018,7 +2207,7 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
                     contentScale = ContentScale.Crop
                 )
                 Text("About OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp))
-                Text("Version 2.3.0", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                Text("Version 2.3.1", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
             }
         }
         AnimItem(2) {
@@ -2068,12 +2257,16 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
 fun LinkRow(title: String, subtitle: String, onClick: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.padding(vertical = 13.dp).clickable(onClick = onClick)
+        modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Button, onClick = onClick).padding(vertical = 13.dp)
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(title, fontWeight = FontWeight.Bold)
             Text(subtitle, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
         }
-        Image(painter = painterResource(R.drawable.ic_external), contentDescription = null, modifier = Modifier.size(20.dp))
+        Image(
+            painter = painterResource(R.drawable.ic_external), contentDescription = null,
+            modifier = Modifier.size(20.dp),
+            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(MaterialTheme.colorScheme.onSurface)
+        )
     }
 }

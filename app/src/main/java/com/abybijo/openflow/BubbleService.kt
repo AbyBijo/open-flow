@@ -57,8 +57,8 @@ class BubbleService : Service() {
     companion object {
         /** Sent by ReviewActivity when the user taps Insert on a reviewed dictation. */
         const val ACTION_INSERT_REVIEWED = "com.abybijo.openflow.INSERT_REVIEWED"
-        /** Bars in the recording waveform — long enough to read as a voice trace. */
-        private const val WAVE_BAR_COUNT = 11
+        /** Bars in the recording waveform — seven tall bars, newest on the right. */
+        private const val WAVE_BAR_COUNT = 7
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -256,7 +256,7 @@ class BubbleService : Service() {
                 }
                 alpha = 0.9f
             }
-            val barParams = LinearLayout.LayoutParams(dp(4), dp(10))
+            val barParams = LinearLayout.LayoutParams(dp(4), dp(16))
             barParams.setMargins(dp(2), 0, dp(2), 0)
             waveRow?.addView(bar, barParams)
             bars.add(bar)
@@ -691,7 +691,7 @@ class BubbleService : Service() {
                 for (i in 0 until WAVE_BAR_COUNT - 1) waveLevels[i] = waveLevels[i + 1]
                 waveLevels[WAVE_BAR_COUNT - 1] = smoothLevel
                 for (i in waveBars.indices) {
-                    waveBars[i].scaleY = 0.35f + waveLevels[i] * 1.35f
+                    waveBars[i].scaleY = 0.35f + waveLevels[i] * 1.5f
                     waveBars[i].alpha = 0.35f + 0.65f * (i.toFloat() / (WAVE_BAR_COUNT - 1))
                 }
                 liveDot?.alpha = 0.3f + smoothLevel * 0.7f

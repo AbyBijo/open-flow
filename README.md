@@ -17,6 +17,10 @@ Speak in any app with a floating bubble, and your words appear as text — power
 3. **Home:** greeting, Flow bubble toggle, free usage today (progress ring, minutes of 8 hours, tracked from real recorded audio and reset at midnight), "Try the bubble" in-app demo (a fake Messages chat where you dictate for real), Recent dictations (tap to copy, local only).
 4. **Settings:** bubble size / opacity / colour (5 presets) / shape (Circle / Pill) / snap-to-edge / waveform, Groq API key (masked, Change re-runs live verification), auto-punctuation, haptic feedback, theme (System / Light / Dark), and a separate About page.
 
+## UI notes
+
+See `docs/UI_CHANGES.md` for the latest layout, animation and accessibility work.
+
 ## Groq free tier
 
 Groq's free plan covers Whisper at 20 requests/minute, 2,000 requests/day, 7,200 audio seconds/hour and **28,800 audio seconds/day — 8 hours of dictation a day**, no credit card. The key is stored only on the phone in EncryptedSharedPreferences and is never logged. Each user uses their own quota, so there is no server bill for the developer and no server at all for OpenFlow.

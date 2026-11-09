@@ -10,15 +10,19 @@ import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalView
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -40,6 +44,9 @@ class MainActivity : ComponentActivity() {
         // System splash screen first: drawn from the very first frame, so
         // cold start never flashes a blank window.
         installSplashScreen()
+        // Draw behind the system bars on every Android version; the screens
+        // apply status / navigation / cutout insets themselves.
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         refreshPermissions()
         val factory = object : ViewModelProvider.Factory {
@@ -58,6 +65,15 @@ class MainActivity : ComponentActivity() {
                 "light" -> false
                 "dark" -> true
                 else -> systemDark
+            }
+            // Status / navigation bar icons follow the in-app theme (which
+            // can differ from the system theme), so they are never
+            // dark-on-dark or light-on-light.
+            val hostView = LocalView.current
+            SideEffect {
+                val controller = WindowCompat.getInsetsController(window, hostView)
+                controller.isAppearanceLightStatusBars = !isDark
+                controller.isAppearanceLightNavigationBars = !isDark
             }
             // Keep the floating bubble in sync with the toggle and the real
             // permissions. The toggle alone cannot do this: it only fires on
