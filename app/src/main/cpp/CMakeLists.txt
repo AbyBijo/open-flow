@@ -26,8 +26,10 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OPENFLOW_OPT_FLAGS} -fvisibility=hidden -f
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OPENFLOW_OPT_FLAGS} -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections")
 set(CMAKE_C_FLAGS_DEBUG "-O3 -g")
 set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG")
+set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O3 -g -DNDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG "-O3 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g -DNDEBUG")
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -flto -Wl,--gc-sections -Wl,--exclude-libs,ALL")
 
 FetchContent_Declare(

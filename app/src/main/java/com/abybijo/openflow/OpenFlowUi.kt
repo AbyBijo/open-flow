@@ -1956,6 +1956,17 @@ fun SettingsContent(
                 )
                 Spacer(Modifier.height(1.dp).fillMaxWidth().background(MaterialTheme.colorScheme.outline))
                 SettingRow(
+                    title = "Stop on long pause",
+                    subtitle = "Stops and transcribes after 5 seconds of silence",
+                    content = {
+                        Switch(
+                            checked = prefs.stopOnLongPause, onCheckedChange = { vm.setStopOnLongPause(it) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = Accent, uncheckedThumbColor = Color.White, uncheckedTrackColor = MaterialTheme.colorScheme.outline)
+                        )
+                    }
+                )
+                Spacer(Modifier.height(1.dp).fillMaxWidth().background(MaterialTheme.colorScheme.outline))
+                SettingRow(
                     title = "Haptic feedback",
                     content = {
                         Switch(
@@ -2535,8 +2546,9 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
                                     fieldHint = "Transcribing..."
                                     val file = recordingFile ?: return@clickable
                                     val seconds = recorder.stop(file)
+                                    val samples = recorder.samples()
                                     scope.launch {
-                                        when (val result = vm.transcribeFile(file)) {
+                                        when (val result = vm.transcribeFile(file, samples)) {
                                             is TranscribeResult.Ok -> {
                                                 val text = vm.applyPunctuation(result.text)
                                                 // Inserted: the bubble shows the check
@@ -2635,7 +2647,7 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
                     contentScale = ContentScale.Crop
                 )
                 Text("About OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp))
-                Text("Version 2.4.1", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                Text("Version 2.4.2", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
             }
         }
         AnimItem(2) {

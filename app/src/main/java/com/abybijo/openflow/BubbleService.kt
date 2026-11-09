@@ -73,6 +73,14 @@ class BubbleService : Service() {
     private var state: BubbleState = BubbleState.IDLE
     private var prefs: Prefs = Prefs()
     private var wavePollJob: Job? = null
+    /** Long-pause auto-stop poll — runs during every recording, even
+     * when the waveform is hidden (that poll only runs when bars are
+     * shown, so this one is separate). */
+    private var autoStopJob: Job? = null
+    /** True when the current recording started from hold-to-talk.
+     * Auto-stop only applies to tap-initiated recordings — releasing
+     * already stops a hold, so a hold must never be auto-stopped. */
+    private var recordingByHold = false
     private var resultResetJob: Job? = null
     private var snapAnimator: ValueAnimator? = null
     private var micIcon: ImageView? = null
@@ -529,6 +537,7 @@ class BubbleService : Service() {
             // current bubble may start a hold-to-talk recording.
             if (bubbleView === rootView && !dragged && state == BubbleState.IDLE) {
                 holdingToTalk = true
+                recordingByHold = true
                 haptic()
                 startRecording()
             }
@@ -827,6 +836,9 @@ class BubbleService : Service() {
                     breathingCircle?.visibility = View.GONE
                     stopWaveAnimation()
                 }
+                // Runs whether or not the bars are shown: a hidden
+                // waveform must not disable the long-pause stop.
+                startAutoStopPoll()
             }
             BubbleState.TRANSCRIBING -> {
                 waveRow?.visibility = View.GONE
@@ -938,9 +950,36 @@ class BubbleService : Service() {
         }
     }
 
+    /**
+     * Long-pause auto-stop: if the user falls silent for longer than
+     * [WavRecorder.AUTO_STOP_SILENCE_SECONDS] during a tap-initiated
+     * recording, stop and transcribe exactly as if they had tapped.
+     * Normal gaps between sentences (1–2 s) never trigger it, and the
+     * recorder only starts counting once speech has begun, so
+     * thinking before the first word is safe. Hold-to-talk is
+     * excluded (releasing already stops it). A 250 ms poll is plenty
+     * for a 5 s threshold and costs nothing.
+     */
+    private fun startAutoStopPoll() {
+        autoStopJob?.cancel()
+        autoStopJob = scope.launch {
+            while (state == BubbleState.RECORDING) {
+                if (prefs.stopOnLongPause && !recordingByHold &&
+                    (recorder?.silenceSeconds() ?: 0f) >= WavRecorder.AUTO_STOP_SILENCE_SECONDS
+                ) {
+                    stopAndTranscribe()
+                    return@launch
+                }
+                delay(250)
+            }
+        }
+    }
+
     private fun stopWaveAnimation() {
         wavePollJob?.cancel()
         wavePollJob = null
+        autoStopJob?.cancel()
+        autoStopJob = null
         breathingAnimators.forEach { try { it.cancel() } catch (_: Exception) { } }
         breathingAnimators = emptyList()
         breathingCircle?.scaleX = 1f
@@ -954,7 +993,10 @@ class BubbleService : Service() {
     private fun onBubbleTap() {
         haptic()
         when (state) {
-            BubbleState.IDLE, BubbleState.INSERTED, BubbleState.COPIED -> startRecording()
+            BubbleState.IDLE, BubbleState.INSERTED, BubbleState.COPIED -> {
+                recordingByHold = false
+                startRecording()
+            }
             BubbleState.RECORDING -> stopAndTranscribe()
             BubbleState.TRANSCRIBING -> { /* ignore taps while transcribing */ }
         }
@@ -1001,11 +1043,16 @@ class BubbleService : Service() {
         val file = recordingFile ?: return
         recorder = null
         recordingFile = null
+        recordingByHold = false
         setState(BubbleState.TRANSCRIBING)
         scope.launch(Dispatchers.IO) {
             // WAV finalisation (thread join + header write) happens off
-            // the main thread: tap-stop must return instantly.
+            // the main thread: tap-stop must return instantly. The
+            // in-memory samples come from the same recorder — the
+            // on-device engine transcribes them in one call, while
+            // the WAV file stays for the Groq fallback.
             val seconds = rec.stop(file)
+            val samples = rec.samples()
             // The selected engine transcribes; when On-device is picked
             // but the model is missing or local transcription fails,
             // Groq is used for this utterance instead — the dictation
@@ -1016,6 +1063,7 @@ class BubbleService : Service() {
                 prefs.engine,
                 prefs.localModelId,
                 file,
+                samples,
                 onFallback = { message ->
                     withContext(Dispatchers.Main) {
                         Toast.makeText(this@BubbleService, message, Toast.LENGTH_LONG).show()

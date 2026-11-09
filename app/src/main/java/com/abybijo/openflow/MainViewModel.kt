@@ -169,6 +169,7 @@ class MainViewModel(private val context: Context) : ViewModel() {
     fun setAutoPunctuation(on: Boolean) = viewModelScope.launch { Store.setAutoPunctuation(context, on) }
     fun setCleanTranscript(on: Boolean) = viewModelScope.launch { Store.setCleanTranscript(context, on) }
     fun setReviewBeforeInsert(on: Boolean) = viewModelScope.launch { Store.setReviewBeforeInsert(context, on) }
+    fun setStopOnLongPause(on: Boolean) = viewModelScope.launch { Store.setStopOnLongPause(context, on) }
     fun setHaptic(on: Boolean) = viewModelScope.launch { Store.setHaptic(context, on) }
 
     fun completeOnboarding() = viewModelScope.launch { Store.setOnboardingDone(context) }
@@ -195,10 +196,12 @@ class MainViewModel(private val context: Context) : ViewModel() {
         return if (trimmed.last() in listOf('.', '!', '?')) trimmed else "$trimmed."
     }
 
-    /** Transcribe a finished WAV file with the selected engine (Groq or on-device). */
-    suspend fun transcribeFile(wavFile: File): TranscribeResult {
+    /** Transcribe a finished WAV file with the selected engine (Groq or on-device).
+     * [samples] is the same audio in memory — the on-device path uses it
+     * directly and never reads the file back. */
+    suspend fun transcribeFile(wavFile: File, samples: FloatArray? = null): TranscribeResult {
         val (result, usedGroq) = transcribeWithFallback(
-            context, prefs.value.engine, prefs.value.localModelId, wavFile
+            context, prefs.value.engine, prefs.value.localModelId, wavFile, samples
         )
         lastTranscribeUsedGroq = usedGroq
         return result

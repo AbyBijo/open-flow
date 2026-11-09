@@ -13,8 +13,16 @@ import kotlin.math.sqrt
 /**
  * Records 16 kHz mono PCM to a WAV file. VOICE_RECOGNITION source first,
  * MIC as fallback. Recording runs until the user stops it — there is no
- * time cap. Long recordings are split into chunks at transcription time
- * (see SttEngine), so nothing is ever cut off.
+ * time cap. The samples are kept in memory as well as on disk, so the
+ * on-device engine can transcribe them in one call without a file
+ * round-trip (the WAV file is still written: Groq fallback needs it
+ * for upload, and history/stats need the recorded duration).
+ *
+ * The recorder also watches every 100 ms frame for speech (RMS
+ * against [SPEECH_RMS_THRESHOLD]) and remembers where speech last
+ * happened. That one measurement serves two features: trimming the
+ * silence off the ends before transcription, and stopping the
+ * recording automatically after a long pause.
  */
 class WavRecorder {
     companion object {
@@ -23,6 +31,17 @@ class WavRecorder {
         const val FULL_SCALE_PEAK = 6000
         /** Silent bars never fall below this level. */
         const val LEVEL_FLOOR = 0.20f
+        /**
+         * A 100 ms frame counts as speech when its RMS reaches this
+         * level (samples in -1..1). Quiet-room noise sits well below
+         * it; normal speech sits well above. Deliberately low, and
+         * both uses of it fail safe: the trim returns the full audio
+         * when nothing passes it, and auto-stop only arms after
+         * speech has started.
+         */
+        const val SPEECH_RMS_THRESHOLD = 0.008f
+        /** Auto-stop fires after this many seconds of continuous silence. */
+        const val AUTO_STOP_SILENCE_SECONDS = 5f
     }
 
     private var recorder: AudioRecord? = null
@@ -31,6 +50,14 @@ class WavRecorder {
     private var pcmBytes = 0
     /** Peak absolute sample of the most recent 100 ms buffer, for the live waveform. */
     @Volatile private var lastPeak = 0
+    /** Every captured 100 ms frame, in order — the in-memory copy of the recording. */
+    private val sampleChunks = ArrayList<ShortArray>()
+    /** Samples captured so far (frames * 1600). */
+    @Volatile private var totalSamples = 0
+    /** Sample index just past the end of the last speech frame; -1 until any speech is seen. */
+    @Volatile private var lastSpeechSample = -1
+    /** True once any frame has passed the speech threshold. */
+    @Volatile private var speechStarted = false
 
     /**
      * Live mic level, 0..1. Square-root mapping against a full-scale peak of
@@ -75,6 +102,10 @@ class WavRecorder {
         recorder = source
         pcmBytes = 0
         lastPeak = 0
+        sampleChunks.clear()
+        totalSamples = 0
+        lastSpeechSample = -1
+        speechStarted = false
         recording = true
         try {
             FileOutputStream(outputFile).use { it.write(ByteArray(44)) }
@@ -90,11 +121,25 @@ class WavRecorder {
                     val read = source.read(buffer, 0, buffer.size)
                     if (read > 0) {
                         var peak = 0
+                        var sumSq = 0.0
                         for (i in 0 until read) {
                             val abs = kotlin.math.abs(buffer[i].toInt())
                             if (abs > peak) peak = abs
+                            val f = buffer[i] / 32768f
+                            sumSq += (f * f).toDouble()
                         }
                         lastPeak = peak
+                        // One shared speech measurement: the same RMS
+                        // threshold drives the silence trim and the
+                        // long-pause auto-stop, so they can never
+                        // disagree about what counts as speech.
+                        val rms = kotlin.math.sqrt(sumSq / read).toFloat()
+                        if (rms >= SPEECH_RMS_THRESHOLD) {
+                            speechStarted = true
+                            lastSpeechSample = totalSamples + read
+                        }
+                        sampleChunks.add(buffer.copyOf(read))
+                        totalSamples += read
                         val bytes = ByteBuffer.allocate(read * 2)
                             .order(ByteOrder.LITTLE_ENDIAN)
                         for (i in 0 until read) bytes.putShort(buffer[i])
@@ -132,6 +177,35 @@ class WavRecorder {
     }
 
     fun isRecording(): Boolean = recording
+
+    /**
+     * All captured audio as float samples in -1..1, in order. Call
+     * only after [stop] — the recording thread has joined by then, so
+     * the chunks are stable. The on-device engine transcribes this
+     * array in one call; no file is read back for it.
+     */
+    fun samples(): FloatArray {
+        val total = totalSamples
+        if (total <= 0) return FloatArray(0)
+        val out = FloatArray(total)
+        var off = 0
+        for (chunk in sampleChunks) {
+            for (i in chunk.indices) out[off++] = chunk[i] / 32768f
+        }
+        return out
+    }
+
+    /**
+     * Seconds of continuous silence since the last speech frame. 0
+     * while speech is ongoing, and 0 until any speech has been heard
+     * at all — the long-pause auto-stop only arms once the user has
+     * actually started talking, so thinking before the first word
+     * never stops a recording.
+     */
+    fun silenceSeconds(): Float {
+        if (!speechStarted || lastSpeechSample < 0) return 0f
+        return ((totalSamples - lastSpeechSample).coerceAtLeast(0)).toFloat() / SAMPLE_RATE
+    }
 
     private fun wavHeader(pcmBytes: Int): ByteArray {
         val total = pcmBytes + 36

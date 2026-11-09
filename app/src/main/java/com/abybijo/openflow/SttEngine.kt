@@ -10,8 +10,6 @@ import java.nio.ByteOrder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** On-device Whisper works in 30-second windows. */
-private const val LOCAL_CHUNK_SECONDS = 30L
 /** Groq takes at most 25 MB per file; 600 s of 16 kHz mono is 19.2 MB, safely under. */
 private const val GROQ_CHUNK_SECONDS = 600L
 private const val GROQ_SINGLE_MAX_BYTES = 20L * 1024L * 1024L
@@ -41,22 +39,29 @@ class GroqEngine(private val key: String) : SttEngine {
  * accounting counts Groq only). [onFallback] reports the switch so
  * the caller can tell the user.
  *
- * Long recordings are chunked, never cut: on-device audio is split
- * into 30-second chunks (Whisper's window) and Groq audio into
- * 600-second chunks (under its 25 MB file limit), then merged in
- * order. Short recordings take the single-call path, exactly as
- * before. A chunk is never dropped silently — if any chunk fails,
+ * The on-device path takes the samples straight from the recorder
+ * ([samples], in memory) and makes ONE whisper_full call — whisper.cpp
+ * windows 30 seconds internally, so no manual chunking is needed and
+ * no chunk files ever touch the disk. Groq audio is still chunked
+ * into 600-second pieces (under its 25 MB file limit) and merged in
+ * order. A chunk is never dropped silently — if any chunk fails,
  * the whole transcription reports the failure.
+ *
+ * [samples] is the same audio as [wavFile]; the WAV file is still
+ * recorded in parallel because Groq fallback needs it for upload.
+ * When [samples] is null the local path decodes the file in memory
+ * instead (still one call, still no chunking).
  */
 suspend fun transcribeWithFallback(
     context: Context,
     engine: String,
     modelId: String,
     wavFile: File,
+    samples: FloatArray? = null,
     onFallback: (suspend (String) -> Unit)? = null
 ): Pair<TranscribeResult, Boolean> {
     if (engine == "local") {
-        when (val local = transcribeLocalInChunks(context, modelId, wavFile)) {
+        when (val local = transcribeLocal(context, modelId, wavFile, samples)) {
             is TranscribeResult.Ok -> return local to false
             is TranscribeResult.LocalModelMissing -> {
                 onFallback?.invoke("On-device model not downloaded — used Groq instead.")
@@ -70,40 +75,60 @@ suspend fun transcribeWithFallback(
     return transcribeGroqInChunks(context, wavFile)
 }
 
-/** Length of a 16 kHz mono 16-bit WAV in whole seconds, from its file size. */
-private fun wavDurationSeconds(wavFile: File): Long {
-    val pcmBytes = (wavFile.length() - 44).coerceAtLeast(0)
-    return pcmBytes / (WavRecorder.SAMPLE_RATE * 2)
+/**
+ * Trim the silence off both ends of a recording, using the same
+ * speech measurement the recorder uses live (RMS per 100 ms frame
+ * against [WavRecorder.SPEECH_RMS_THRESHOLD]). Pauses never reach
+ * the model — openWispr's VAD trim does the same with a Silero
+ * model; this amplitude version is lighter (no ONNX dependency, no
+ * extra download) and fails safe: when nothing passes the threshold
+ * the audio comes back untouched, and 0.3 s of padding on both ends
+ * keeps word onsets and tails intact. Internal pauses are kept —
+ * only the dead air at the start and end is cut.
+ */
+fun trimSilence(samples: FloatArray): FloatArray {
+    if (samples.isEmpty()) return samples
+    val frame = WavRecorder.SAMPLE_RATE / 10 // 100 ms frames
+    val pad = (WavRecorder.SAMPLE_RATE * 0.3f).toInt() // 0.3 s padding
+    val minKept = WavRecorder.SAMPLE_RATE / 2 // never keep less than 0.5 s
+    fun frameIsSpeech(start: Int): Boolean {
+        val end = minOf(start + frame, samples.size)
+        if (end <= start) return false
+        var sumSq = 0.0
+        for (i in start until end) {
+            val f = samples[i].toDouble()
+            sumSq += f * f
+        }
+        return kotlin.math.sqrt(sumSq / (end - start)).toFloat() >= WavRecorder.SPEECH_RMS_THRESHOLD
+    }
+    var firstSpeech = -1
+    var lastSpeech = -1
+    var i = 0
+    while (i < samples.size) {
+        if (frameIsSpeech(i)) {
+            if (firstSpeech < 0) firstSpeech = i
+            lastSpeech = i
+        }
+        i += frame
+    }
+    if (firstSpeech < 0 || lastSpeech < 0) return samples // nothing detected: return it all
+    val start = (firstSpeech - pad).coerceAtLeast(0)
+    val end = (lastSpeech + frame + pad).coerceAtMost(samples.size)
+    if (end - start < minKept) return samples
+    return samples.copyOfRange(start, end)
 }
 
-/** On-device transcription of any length, chunked at 30 seconds and merged in order. */
-private suspend fun transcribeLocalInChunks(
+/** On-device transcription of any length in a single in-memory call. */
+private suspend fun transcribeLocal(
     context: Context,
     modelId: String,
-    wavFile: File
+    wavFile: File,
+    samples: FloatArray?
 ): TranscribeResult {
-    if (wavDurationSeconds(wavFile) <= LOCAL_CHUNK_SECONDS) {
-        return LocalWhisperEngine(context, modelId).transcribe(wavFile)
-    }
-    val chunks = withContext(Dispatchers.IO) { splitWav(context, wavFile, LOCAL_CHUNK_SECONDS) }
-    if (chunks.isEmpty()) return TranscribeResult.Error("No audio was recorded.")
-    try {
-        val engine = LocalWhisperEngine(context, modelId)
-        val parts = mutableListOf<String>()
-        for (chunk in chunks) {
-            when (val r = engine.transcribe(chunk)) {
-                is TranscribeResult.Ok -> if (r.text.isNotBlank()) parts.add(r.text)
-                is TranscribeResult.LocalModelMissing -> return TranscribeResult.LocalModelMissing
-                is TranscribeResult.Error -> return r
-                else -> return TranscribeResult.Error("On-device transcription failed.")
-            }
-        }
-        val merged = parts.joinToString(" ").trim()
-        return if (merged.isBlank()) TranscribeResult.Error("Didn't catch that. Please try speaking again.")
-        else TranscribeResult.Ok(merged)
-    } finally {
-        chunks.forEach { try { it.delete() } catch (_: Exception) { } }
-    }
+    val raw = samples?.takeIf { it.isNotEmpty() } ?: wavToFloatSamples(wavFile)
+    if (raw.isEmpty()) return TranscribeResult.Error("No audio was recorded.")
+    val trimmed = trimSilence(raw)
+    return LocalWhisperEngine(context, modelId).transcribeSamples(trimmed)
 }
 
 /** Groq transcription of any length, chunked under the 25 MB file limit and merged in order. */
@@ -230,13 +255,14 @@ suspend fun warmLocalEngine(context: Context, modelId: String) {
  * On-device Whisper: a downloaded model file, transcribed fully
  * offline on the CPU. The loaded model stays cached across
  * dictations, so the second utterance starts at once instead of
- * re-reading a 32–466 MB file every time.
+ * re-reading a 32–466 MB file every time. Takes samples in memory —
+ * one whisper_full call, whatever the length.
  */
 class LocalWhisperEngine(
     private val context: Context,
     private val modelId: String
-) : SttEngine {
-    override suspend fun transcribe(wavFile: File): TranscribeResult =
+) {
+    suspend fun transcribeSamples(samples: FloatArray): TranscribeResult =
         withContext(Dispatchers.Default) {
             val model = ModelCatalog.byId(modelId)
             if (!ModelDownloader.isDownloaded(context, model)) {
@@ -245,7 +271,6 @@ class LocalWhisperEngine(
             if (!WhisperEngine.isAvailable) {
                 return@withContext TranscribeResult.Error("On-device engine is not available on this phone.")
             }
-            val samples = wavToFloatSamples(wavFile)
             if (samples.isEmpty()) {
                 return@withContext TranscribeResult.Error("No audio was recorded.")
             }
@@ -260,39 +285,41 @@ class LocalWhisperEngine(
                 )
             }
         }
+}
 
-    /**
-     * Decode a 16 kHz mono PCM WAV into float samples in -1..1. Our
-     * own recorder writes a plain 44-byte header, but the "data" chunk
-     * is scanned for anyway so an extra chunk never shifts the audio.
-     */
-    private fun wavToFloatSamples(wavFile: File): FloatArray {
-        val bytes = try {
-            wavFile.readBytes()
-        } catch (_: Exception) {
-            return FloatArray(0)
-        }
-        var dataStart = 44
-        var i = 12
-        while (i + 8 <= bytes.size) {
-            val id = String(bytes, i, 4, Charsets.US_ASCII)
-            val chunkSize = ByteBuffer.wrap(bytes, i + 4, 4)
-                .order(ByteOrder.LITTLE_ENDIAN).int
-            if (id == "data") {
-                dataStart = i + 8
-                break
-            }
-            if (chunkSize <= 0) break
-            i += 8 + chunkSize
-        }
-        if (dataStart >= bytes.size) return FloatArray(0)
-        val count = (bytes.size - dataStart) / 2
-        val out = FloatArray(count)
-        val buf = ByteBuffer.wrap(bytes, dataStart, count * 2)
-            .order(ByteOrder.LITTLE_ENDIAN)
-        for (n in 0 until count) out[n] = buf.short / 32768f
-        return out
+/**
+ * Decode a 16 kHz mono PCM WAV into float samples in -1..1. Only a
+ * safety net for the local path when the recorder's in-memory samples
+ * are unavailable; the normal path never reads the file back. Our own
+ * recorder writes a plain 44-byte header, but the "data" chunk is
+ * scanned for anyway so an extra chunk never shifts the audio.
+ */
+private fun wavToFloatSamples(wavFile: File): FloatArray {
+    val bytes = try {
+        wavFile.readBytes()
+    } catch (_: Exception) {
+        return FloatArray(0)
     }
+    var dataStart = 44
+    var i = 12
+    while (i + 8 <= bytes.size) {
+        val id = String(bytes, i, 4, Charsets.US_ASCII)
+        val chunkSize = ByteBuffer.wrap(bytes, i + 4, 4)
+            .order(ByteOrder.LITTLE_ENDIAN).int
+        if (id == "data") {
+            dataStart = i + 8
+            break
+        }
+        if (chunkSize <= 0) break
+        i += 8 + chunkSize
+    }
+    if (dataStart >= bytes.size) return FloatArray(0)
+    val count = (bytes.size - dataStart) / 2
+    val out = FloatArray(count)
+    val buf = ByteBuffer.wrap(bytes, dataStart, count * 2)
+        .order(ByteOrder.LITTLE_ENDIAN)
+    for (n in 0 until count) out[n] = buf.short / 32768f
+    return out
 }
 
 /** Process-wide cache: one loaded model, shared by every dictation. */

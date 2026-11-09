@@ -36,6 +36,7 @@ data class Prefs(
     val autoPunctuation: Boolean = true,
     val cleanTranscript: Boolean = true,
     val reviewBeforeInsert: Boolean = false,
+    val stopOnLongPause: Boolean = true,
     val engine: String = "groq", // groq | local
     val localModelId: String = ModelCatalog.DEFAULT_MODEL_ID,
     /** Onboarding engine choice ("groq" | "local", "" = not chosen yet). */
@@ -60,6 +61,7 @@ object Store {
     private val AUTO_PUNCT = booleanPreferencesKey("auto_punctuation")
     private val CLEAN_TRANSCRIPT = booleanPreferencesKey("clean_transcript")
     private val REVIEW_BEFORE_INSERT = booleanPreferencesKey("review_before_insert")
+    private val STOP_ON_LONG_PAUSE = booleanPreferencesKey("stop_on_long_pause")
     private val ENGINE = stringPreferencesKey("engine")
     private val LOCAL_MODEL_ID = stringPreferencesKey("local_model_id")
     private val ONBOARDING_ENGINE = stringPreferencesKey("onboarding_engine")
@@ -89,6 +91,7 @@ object Store {
             autoPunctuation = p[AUTO_PUNCT] ?: true,
             cleanTranscript = p[CLEAN_TRANSCRIPT] ?: true,
             reviewBeforeInsert = p[REVIEW_BEFORE_INSERT] ?: false,
+            stopOnLongPause = p[STOP_ON_LONG_PAUSE] ?: true,
             engine = (p[ENGINE] ?: "groq").takeIf { it == "local" } ?: "groq",
             localModelId = p[LOCAL_MODEL_ID] ?: ModelCatalog.DEFAULT_MODEL_ID,
             onboardingEngine = (p[ONBOARDING_ENGINE] ?: "").takeIf { it == "local" || it == "groq" } ?: "",
@@ -179,6 +182,10 @@ object Store {
 
     suspend fun setReviewBeforeInsert(context: Context, on: Boolean) {
         context.dataStore.edit { it[REVIEW_BEFORE_INSERT] = on }
+    }
+
+    suspend fun setStopOnLongPause(context: Context, on: Boolean) {
+        context.dataStore.edit { it[STOP_ON_LONG_PAUSE] = on }
     }
 
     suspend fun setEngine(context: Context, engine: String) {

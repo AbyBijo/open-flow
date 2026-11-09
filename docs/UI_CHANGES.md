@@ -1,5 +1,11 @@
 # UI / UX changes (on top of v2.3.0)
 
+## v2.4.2
+
+- Speed is the headline again: the encoder context is now sized to the actual clip instead of always running the full 30 seconds (about twice as fast on the encoder for typical short dictations), silence is trimmed off both ends before the model sees it, and the local path transcribes the in-memory samples in one call — no WAV read-back, no 30-second chunk files on disk. Temperature 0 and non-speech suppression cut wasted decode steps. The release build's RelWithDebInfo configuration now gets -O3 as well.
+- Long-pause auto-stop: if you fall silent for 5 seconds during a tap-started recording, it stops and transcribes by itself, exactly like a tap-stop. Normal gaps between sentences never trigger it, and it only arms once you have started talking. Settings has a "Stop on long pause" toggle (on by default); hold-to-talk is unaffected.
+- Groq behaviour is unchanged: it still uploads the WAV file, still chunks long audio under its 25 MB limit, and still falls back the same way when on-device fails.
+
 ## v2.4.1
 
 - Speed is the headline: the native Whisper engine is now compiled with full optimisation (-O3, armv8.2-a+fp16, link-time optimisation) in every build type, including Debug — the shipped APK never runs it unoptimised again. Thread count follows the phone's fast cores (up to 6, never below 4) instead of a flat cap of 4, and English dictation decodes in one segment.

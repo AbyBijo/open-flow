@@ -3,9 +3,17 @@
 //
 // Two lessons from v1 are baked in and must not be "improved" away:
 //  - Pin the language to "en" and keep whisper's defaults. Letting the
-//    decoder auto-detect the language on short utterances, or shrinking
-//    the encoder context, made on-device dictation return empty text.
+//    decoder auto-detect the language on short utterances made
+//    on-device dictation return empty text.
 //  - CPU only. Android has no GPU backend in this build.
+//
+// v2.4.2 corrects an older rule that used to live here ("never shrink
+// audio_ctx"): openWispr measured that sizing audio_ctx to the actual
+// clip is ~2x faster on the encoder for typical 3-8s dictations, with
+// negligible accuracy cost — the 768 floor keeps the decoder from
+// looping on very short clips. Stock Whisper zero-pads every clip to
+// 30s and runs the full encoder over the padding, so the old rule was
+// paying for 30s of encoder work on a 3s utterance.
 #include <jni.h>
 #include <cstdlib>
 #include <fstream>
@@ -94,9 +102,30 @@ Java_com_abybijo_openflow_whisper_WhisperEngine_nativeTranscribe(
     // Decode the whole clip as one segment (openWispr does the same
     // for English): splitting it only costs decode time.
     params.single_segment = true;
-    // audio_ctx is deliberately left at its default (0 = the model's
-    // own 1500). Scaling it down for short utterances breaks the
-    // encoder context the model was trained with.
+    // Size the encoder context to the actual clip (openWispr's
+    // measured formula): stock Whisper zero-pads the mel to 30s
+    // (audio_ctx=1500) and runs the full encoder over it, so a short
+    // dictation wastes ~7x encoder compute. needed is the clip length
+    // in encoder tokens (~50/sec) plus a small margin, rounded up to
+    // a multiple of 64 for hardware tiling; the 768 floor keeps the
+    // decoder from looping on very short clips, and 1500 is Whisper's
+    // 30s maximum. Typical 3-8s clips land at the 768 floor, about
+    // twice as fast on the encoder, negligible accuracy cost.
+    {
+        int needed = (size + 319) / 320 + 16; // ceil(size/16000*50) + 16
+        int ctx = ((needed + 63) / 64) * 64;
+        if (ctx < 768) ctx = 768;
+        if (ctx > 1500) ctx = 1500;
+        params.audio_ctx = ctx;
+    }
+    // Greedy at temperature 0: the fewest wasted decode steps. The
+    // temperature fallback (temperature_inc, default 0.2) is deliberately
+    // left on — it is what catches a repetition loop and re-runs the
+    // clip hotter, so a rare bad decode costs latency instead of
+    // looping forever. Non-speech tokens are suppressed for the same
+    // reason: fewer wasted steps.
+    params.temperature = 0.0f;
+    params.suppress_nst = true;
     params.n_threads = pickThreadCount();
 
     if (whisper_full(ctx, params, samples.data(), static_cast<int>(samples.size())) != 0) {
