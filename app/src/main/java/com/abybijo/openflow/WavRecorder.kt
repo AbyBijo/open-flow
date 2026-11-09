@@ -8,6 +8,7 @@ import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.sqrt
 
 /**
  * Records 16 kHz mono PCM to a WAV file. VOICE_RECOGNITION source first,
@@ -17,12 +18,29 @@ class WavRecorder {
     companion object {
         const val SAMPLE_RATE = 16000
         const val MAX_SECONDS = 60
+        /** Real speech peaks at roughly 1300–2900 on VOICE_RECOGNITION; 6000 is a safe full scale. */
+        const val FULL_SCALE_PEAK = 6000
+        /** Silent bars never fall below this level. */
+        const val LEVEL_FLOOR = 0.20f
     }
 
     private var recorder: AudioRecord? = null
     private var recordingThread: Thread? = null
     @Volatile private var recording = false
     private var pcmBytes = 0
+    /** Peak absolute sample of the most recent 100 ms buffer, for the live waveform. */
+    @Volatile private var lastPeak = 0
+
+    /**
+     * Live mic level, 0..1. Square-root mapping against a full-scale peak of
+     * 6000 — VOICE_RECOGNITION records quiet by design, so scaling against
+     * the 16-bit full scale (32767) would pin every bar to the floor. A
+     * floor of 0.20 keeps silent bars from collapsing into dots.
+     */
+    fun amplitude(): Float {
+        val peak = lastPeak.coerceIn(0, FULL_SCALE_PEAK)
+        return sqrt(peak.toFloat() / FULL_SCALE_PEAK).coerceIn(0f, 1f).coerceAtLeast(LEVEL_FLOOR)
+    }
 
     fun start(outputFile: File): Boolean {
         val minBuffer = AudioRecord.getMinBufferSize(
@@ -55,6 +73,7 @@ class WavRecorder {
         }
         recorder = source
         pcmBytes = 0
+        lastPeak = 0
         recording = true
         try {
             FileOutputStream(outputFile).use { it.write(ByteArray(44)) }
@@ -69,6 +88,12 @@ class WavRecorder {
                 while (recording && pcmBytes < SAMPLE_RATE * 2 * MAX_SECONDS) {
                     val read = source.read(buffer, 0, buffer.size)
                     if (read > 0) {
+                        var peak = 0
+                        for (i in 0 until read) {
+                            val abs = kotlin.math.abs(buffer[i].toInt())
+                            if (abs > peak) peak = abs
+                        }
+                        lastPeak = peak
                         val bytes = ByteBuffer.allocate(read * 2)
                             .order(ByteOrder.LITTLE_ENDIAN)
                         for (i in 0 until read) bytes.putShort(buffer[i])

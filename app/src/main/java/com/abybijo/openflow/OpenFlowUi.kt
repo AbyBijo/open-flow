@@ -63,6 +63,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -442,11 +443,11 @@ fun OpenFlowApp(
                 transitionSpec = {
                     val forward = routeDepth(targetState) > routeDepth(initialState)
                     if (forward) {
-                        (slideInHorizontally(animationSpec = tween(280)) { it } + fadeIn(tween(280))) togetherWith
-                            (slideOutHorizontally(animationSpec = tween(280)) { -it } + fadeOut(tween(280)))
+                        (slideInHorizontally(animationSpec = tween(280, easing = FastOutSlowInEasing)) { it } + fadeIn(tween(280, easing = FastOutSlowInEasing))) togetherWith
+                            (slideOutHorizontally(animationSpec = tween(280, easing = FastOutSlowInEasing)) { -it } + fadeOut(tween(280, easing = FastOutSlowInEasing)))
                     } else {
-                        (slideInHorizontally(animationSpec = tween(280)) { -it } + fadeIn(tween(280))) togetherWith
-                            (slideOutHorizontally(animationSpec = tween(280)) { it } + fadeOut(tween(280)))
+                        (slideInHorizontally(animationSpec = tween(280, easing = FastOutSlowInEasing)) { -it } + fadeIn(tween(280, easing = FastOutSlowInEasing))) togetherWith
+                            (slideOutHorizontally(animationSpec = tween(280, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(280, easing = FastOutSlowInEasing)))
                     }
                 },
                 label = "route"
@@ -1251,11 +1252,16 @@ fun HomeContent(
             // list reads as tiles stacked below each other — never as one
             // block sliding in from behind. The stagger is capped so a
             // long list does not keep late tiles waiting for seconds.
+            // Keyed by timestamp: adding a dictation composes and animates
+            // only the new tile — existing tiles keep their state and
+            // never re-animate or jump.
             prefs.recent.forEachIndexed { index, entry ->
-                AnimItem(7 + minOf(index, 12)) {
-                    HistoryTile(entry = entry, onClick = { onCopyText(entry.text) })
+                key(entry.timestamp) {
+                    AnimItem(7 + minOf(index, 12)) {
+                        HistoryTile(entry = entry, onClick = { onCopyText(entry.text) })
+                    }
+                    Spacer(Modifier.height(12.dp))
                 }
-                Spacer(Modifier.height(12.dp))
             }
         }
         Spacer(Modifier.height(32.dp))
@@ -1271,6 +1277,10 @@ fun SettingsContent(
     onChangeKey: () -> Unit
 ) {
     var previewRecording by remember { mutableStateOf(false) }
+    var previewResult by remember { mutableStateOf(BubblePreviewResult.NONE) }
+    // A tap restarts the sequence; the run id stops an older sequence
+    // from overwriting the new one after its delays.
+    var previewRun by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
     Column {
         AnimItem(0) {
@@ -1288,15 +1298,26 @@ fun SettingsContent(
                         .clip(RoundedCornerShape(20.dp))
                         .background(MaterialTheme.colorScheme.background)
                         .clickable {
+                            val run = previewRun + 1
+                            previewRun = run
                             previewRecording = true
+                            previewResult = BubblePreviewResult.NONE
                             scope.launch {
-                                delay(2200)
+                                delay(1500)
+                                if (previewRun != run) return@launch
                                 previewRecording = false
+                                previewResult = BubblePreviewResult.INSERTED
+                                delay(600)
+                                if (previewRun != run) return@launch
+                                previewResult = BubblePreviewResult.COPIED
+                                delay(1200)
+                                if (previewRun != run) return@launch
+                                previewResult = BubblePreviewResult.NONE
                             }
                         },
                     contentAlignment = Alignment.Center
                 ) {
-                    BubblePreview(prefs = prefs, recording = previewRecording)
+                    BubblePreview(prefs = prefs, recording = previewRecording, result = previewResult)
                 }
                 Text(
                     "Tap to preview", fontSize = 14.sp,
@@ -1390,6 +1411,28 @@ fun SettingsContent(
                     content = {
                         Switch(
                             checked = prefs.autoPunctuation, onCheckedChange = { vm.setAutoPunctuation(it) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = Accent, uncheckedThumbColor = Color.White, uncheckedTrackColor = MaterialTheme.colorScheme.outline)
+                        )
+                    }
+                )
+                Spacer(Modifier.height(1.dp).fillMaxWidth().background(MaterialTheme.colorScheme.outline))
+                SettingRow(
+                    title = "Clean up transcript",
+                    subtitle = "Removes um and uh, fixes self-corrections",
+                    content = {
+                        Switch(
+                            checked = prefs.cleanTranscript, onCheckedChange = { vm.setCleanTranscript(it) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = Accent, uncheckedThumbColor = Color.White, uncheckedTrackColor = MaterialTheme.colorScheme.outline)
+                        )
+                    }
+                )
+                Spacer(Modifier.height(1.dp).fillMaxWidth().background(MaterialTheme.colorScheme.outline))
+                SettingRow(
+                    title = "Review before inserting",
+                    subtitle = "Check the text before it goes in",
+                    content = {
+                        Switch(
+                            checked = prefs.reviewBeforeInsert, onCheckedChange = { vm.setReviewBeforeInsert(it) },
                             colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = Accent, uncheckedThumbColor = Color.White, uncheckedTrackColor = MaterialTheme.colorScheme.outline)
                         )
                     }
@@ -1519,22 +1562,34 @@ fun SegmentedControl(options: List<String>, selected: Int, onSelect: (Int) -> Un
     }
 }
 
+/** Result states the bubble preview can show after a dictation. */
+enum class BubblePreviewResult { NONE, INSERTED, COPIED }
+
 @Composable
-fun BubblePreview(prefs: Prefs, recording: Boolean) {
+fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult = BubblePreviewResult.NONE) {
     val colors = BUBBLE_COLORS[prefs.bubbleColor]
     val size = prefs.bubbleSize.dp
-    val width = if (prefs.bubbleShape == "pill" || recording) size * 1.9f else size
+    val width = if (prefs.bubbleShape == "pill" || recording || result == BubblePreviewResult.COPIED) size * 1.9f else size
     Box(
         modifier = Modifier
             .size(width, size)
             .clip(RoundedCornerShape(size / 2))
             .background(
                 if (recording) Brush.linearGradient(listOf(Red, Red))
+                else if (result == BubblePreviewResult.INSERTED) Brush.linearGradient(listOf(Green, Green))
                 else Brush.linearGradient(listOf(Color(colors.first), Color(colors.second)))
             ),
         contentAlignment = Alignment.Center
     ) {
-        if (recording && prefs.showWaveform) {
+        if (result == BubblePreviewResult.INSERTED) {
+            Image(
+                painter = painterResource(R.drawable.ic_check), contentDescription = null,
+                modifier = Modifier.size(size * 0.45f),
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White)
+            )
+        } else if (result == BubblePreviewResult.COPIED) {
+            Text("Copied", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        } else if (recording && prefs.showWaveform) {
             // Animated waveform: seven bars breathing on staggered phases
             // with an ease-in-out curve, so the recording state moves
             // smoothly instead of ticking mechanically.
@@ -1731,7 +1786,7 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
                     contentScale = ContentScale.Crop
                 )
                 Text("About OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp))
-                Text("Version 2.1.0", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                Text("Version 2.2.0", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
             }
         }
         AnimItem(2) {

@@ -53,6 +53,8 @@ class MainViewModel(private val context: Context) : ViewModel() {
     fun setSnapToEdge(snap: Boolean) = viewModelScope.launch { Store.setSnapToEdge(context, snap) }
     fun setShowWaveform(show: Boolean) = viewModelScope.launch { Store.setShowWaveform(context, show) }
     fun setAutoPunctuation(on: Boolean) = viewModelScope.launch { Store.setAutoPunctuation(context, on) }
+    fun setCleanTranscript(on: Boolean) = viewModelScope.launch { Store.setCleanTranscript(context, on) }
+    fun setReviewBeforeInsert(on: Boolean) = viewModelScope.launch { Store.setReviewBeforeInsert(context, on) }
     fun setHaptic(on: Boolean) = viewModelScope.launch { Store.setHaptic(context, on) }
 
     fun completeOnboarding() = viewModelScope.launch { Store.setOnboardingDone(context) }

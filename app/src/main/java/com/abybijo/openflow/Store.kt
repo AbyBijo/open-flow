@@ -33,6 +33,8 @@ data class Prefs(
     val snapToEdge: Boolean = true,
     val showWaveform: Boolean = true,
     val autoPunctuation: Boolean = true,
+    val cleanTranscript: Boolean = true,
+    val reviewBeforeInsert: Boolean = false,
     val haptic: Boolean = true,
     val usageDate: String = "",
     val usageSeconds: Int = 0,
@@ -51,6 +53,8 @@ object Store {
     private val SNAP = booleanPreferencesKey("snap_to_edge")
     private val WAVEFORM = booleanPreferencesKey("show_waveform")
     private val AUTO_PUNCT = booleanPreferencesKey("auto_punctuation")
+    private val CLEAN_TRANSCRIPT = booleanPreferencesKey("clean_transcript")
+    private val REVIEW_BEFORE_INSERT = booleanPreferencesKey("review_before_insert")
     private val HAPTIC = booleanPreferencesKey("haptic")
     private val USAGE_DATE = stringPreferencesKey("usage_date")
     private val USAGE_SECONDS = intPreferencesKey("usage_seconds")
@@ -75,6 +79,8 @@ object Store {
             snapToEdge = p[SNAP] ?: true,
             showWaveform = p[WAVEFORM] ?: true,
             autoPunctuation = p[AUTO_PUNCT] ?: true,
+            cleanTranscript = p[CLEAN_TRANSCRIPT] ?: true,
+            reviewBeforeInsert = p[REVIEW_BEFORE_INSERT] ?: false,
             haptic = p[HAPTIC] ?: true,
             usageDate = storedDate,
             usageSeconds = usageSeconds,
@@ -148,6 +154,14 @@ object Store {
 
     suspend fun setAutoPunctuation(context: Context, on: Boolean) {
         context.dataStore.edit { it[AUTO_PUNCT] = on }
+    }
+
+    suspend fun setCleanTranscript(context: Context, on: Boolean) {
+        context.dataStore.edit { it[CLEAN_TRANSCRIPT] = on }
+    }
+
+    suspend fun setReviewBeforeInsert(context: Context, on: Boolean) {
+        context.dataStore.edit { it[REVIEW_BEFORE_INSERT] = on }
     }
 
     suspend fun setHaptic(context: Context, on: Boolean) {

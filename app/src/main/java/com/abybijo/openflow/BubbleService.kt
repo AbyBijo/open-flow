@@ -1,17 +1,17 @@
 package com.abybijo.openflow
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
-import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
 import android.os.VibrationEffect
@@ -20,29 +20,43 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.AccelerateDecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
-import android.animation.ObjectAnimator
-import android.animation.ValueAnimator
-import android.view.animation.AccelerateDecelerateInterpolator
 
 /**
  * The floating Flow bubble: a TYPE_APPLICATION_OVERLAY window that sits over
  * every app. FLAG_NOT_FOCUSABLE so tapping it never steals the text-field
  * cursor in the app underneath. Tap to record, tap again to stop and
  * transcribe with Groq, then insert at the cursor (or copy to clipboard).
+ *
+ * The bubble is a classic View overlay, not Compose, so there is no
+ * recomposition anywhere here: the waveform bars move by setting scaleY
+ * (a draw-phase property) from a 55 ms poll, and dragging only updates
+ * the window position. Nothing else runs on the main thread while
+ * dragging or recording.
  */
 class BubbleService : Service() {
+
+    companion object {
+        /** Sent by ReviewActivity when the user taps Insert on a reviewed dictation. */
+        const val ACTION_INSERT_REVIEWED = "com.abybijo.openflow.INSERT_REVIEWED"
+    }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var windowManager: WindowManager? = null
@@ -50,17 +64,29 @@ class BubbleService : Service() {
     private var params: WindowManager.LayoutParams? = null
     private var recorder: WavRecorder? = null
     private var recordingFile: File? = null
+    /** The app the current dictation started in — the insert never goes anywhere else. */
+    private var recordingHostPackage: String? = null
     private var state: BubbleState = BubbleState.IDLE
     private var prefs: Prefs = Prefs()
     private var waveAnimators: List<ObjectAnimator> = emptyList()
+    private var wavePollJob: Job? = null
+    private var resultResetJob: Job? = null
+    private var snapAnimator: ValueAnimator? = null
     private var micIcon: ImageView? = null
+    private var checkIcon: ImageView? = null
+    private var copiedText: TextView? = null
     private var waveRow: LinearLayout? = null
+    private var waveBars: List<View> = emptyList()
+    private var liveDot: View? = null
+    /** Scrolling history of smoothed mic levels, newest on the right. */
+    private var waveLevels = FloatArray(7) { 0.2f }
+    private var smoothLevel = 0.2f
     private var bubbleBg: GradientDrawable? = null
     private var lastX: Int? = null
     private var lastY: Int? = null
     private var pendingRebuild = false
 
-    private enum class BubbleState { IDLE, RECORDING, TRANSCRIBING }
+    private enum class BubbleState { IDLE, RECORDING, TRANSCRIBING, INSERTED, COPIED }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -97,11 +123,27 @@ class BubbleService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_INSERT_REVIEWED) {
+            val text = intent.getStringExtra(ReviewActivity.EXTRA_TEXT).orEmpty()
+            if (text.isNotBlank()) {
+                // The review screen just finished; give the host app a beat
+                // to come back to the front, then insert. The event-driven
+                // pending path covers it if the app is still settling.
+                scope.launch {
+                    delay(350)
+                    insertTranscribedText(text)
+                }
+            }
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
         scope.cancel()
+        stopWaveAnimation()
+        snapAnimator?.cancel()
+        snapAnimator = null
+        OpenFlowAccessibilityService.clearPending()
         try { recorder?.let { } } catch (_: Exception) { }
         try {
             bubbleView?.let { windowManager?.removeView(it) }
@@ -154,19 +196,39 @@ class BubbleService : Service() {
 
         val root = FrameLayout(this)
         root.background = bg
+        val iconSize = (sizePx * 0.45).toInt()
+        val iconParams = FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER)
         micIcon = ImageView(this).apply {
             setImageResource(R.drawable.ic_mic)
             setColorFilter(Color.WHITE)
         }
-        val iconSize = (sizePx * 0.45).toInt()
-        val iconParams = FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER)
         root.addView(micIcon, iconParams)
+        // Green check for the Inserted state. It morphs in over 250 ms.
+        checkIcon = ImageView(this).apply {
+            setImageResource(R.drawable.ic_check)
+            setColorFilter(Color.WHITE)
+            visibility = View.GONE
+        }
+        root.addView(checkIcon, FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER))
+        // "Copied" pill for the clipboard-fallback state.
+        copiedText = TextView(this).apply {
+            text = "Copied"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        root.addView(copiedText, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER
+        ))
 
         waveRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             visibility = View.GONE
         }
+        val bars = mutableListOf<View>()
         repeat(7) {
             val bar = View(this).apply {
                 // Rounded caps, like the Compose preview.
@@ -180,7 +242,23 @@ class BubbleService : Service() {
             val barParams = LinearLayout.LayoutParams(dp(4), dp(10))
             barParams.setMargins(dp(2), 0, dp(2), 0)
             waveRow?.addView(bar, barParams)
+            bars.add(bar)
         }
+        waveBars = bars
+        // The live dot rides at the leading edge of the waveform. Its
+        // brightness follows the real mic level — bright while speaking,
+        // dim in pauses — never a fixed timer.
+        liveDot = View(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.WHITE)
+            }
+            alpha = 0.3f
+            visibility = View.GONE
+        }
+        val dotParams = LinearLayout.LayoutParams(dp(6), dp(6))
+        dotParams.setMargins(dp(4), 0, 0, 0)
+        waveRow?.addView(liveDot, dotParams)
         root.addView(waveRow, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER
@@ -205,22 +283,40 @@ class BubbleService : Service() {
             y = lastY ?: (heightPx * 0.58).toInt()
         }
         bubbleView = root
-        root.setOnTouchListener(DragTouchListener())
+        root.setOnTouchListener(DragTouchListener(root))
         try {
             windowManager?.addView(root, params)
         } catch (e: Exception) {
             Toast.makeText(this, "Could not show the bubble: ${e.message}", Toast.LENGTH_LONG).show()
             stopSelf()
         }
+        applyState()
     }
 
-    private inner class DragTouchListener : View.OnTouchListener {
+    /**
+     * Drag to move, tap to dictate, long-press to hold-to-talk.
+     * Dragging does nothing but move the window — no other work runs on
+     * the main thread while the finger is down. A long-press (~500 ms,
+     * without dragging past the slop) starts recording; releasing stops
+     * it and sends. A normal tap keeps tap-to-start / tap-to-stop.
+     */
+    private inner class DragTouchListener(private val rootView: View) : View.OnTouchListener {
         private var downX = 0f
         private var downY = 0f
         private var startX = 0
         private var startY = 0
         private var downTime = 0L
         private var dragged = false
+        private var holdingToTalk = false
+        private val holdRunnable = Runnable {
+            // The bubble may have been rebuilt under the finger; only the
+            // current bubble may start a hold-to-talk recording.
+            if (bubbleView === rootView && !dragged && state == BubbleState.IDLE) {
+                holdingToTalk = true
+                haptic()
+                startRecording()
+            }
+        }
 
         override fun onTouch(v: View, event: MotionEvent): Boolean {
             when (event.action) {
@@ -231,12 +327,19 @@ class BubbleService : Service() {
                     startY = params?.y ?: 0
                     downTime = System.currentTimeMillis()
                     dragged = false
+                    holdingToTalk = false
+                    snapAnimator?.cancel()
+                    v.postDelayed(holdRunnable, 500)
                     return true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - downX).toInt()
                     val dy = (event.rawY - downY).toInt()
-                    if (kotlin.math.abs(dx) + kotlin.math.abs(dy) > dp(8)) dragged = true
+                    if (!dragged && kotlin.math.abs(dx) + kotlin.math.abs(dy) > dp(8)) {
+                        // Past the drag slop: this is a drag, not a hold.
+                        v.removeCallbacks(holdRunnable)
+                        dragged = true
+                    }
                     if (dragged) {
                         params?.x = startX + dx
                         params?.y = startY + dy
@@ -245,12 +348,29 @@ class BubbleService : Service() {
                     return true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (dragged) {
+                    v.removeCallbacks(holdRunnable)
+                    if (holdingToTalk) {
+                        holdingToTalk = false
+                        if (dragged) {
+                            lastX = params?.x
+                            lastY = params?.y
+                            if (prefs.snapToEdge) snapToEdge()
+                        }
+                        stopAndTranscribe()
+                    } else if (dragged) {
                         lastX = params?.x
                         lastY = params?.y
                         if (prefs.snapToEdge) snapToEdge()
                     } else if (System.currentTimeMillis() - downTime < 500) {
                         onBubbleTap()
+                    }
+                    return true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    v.removeCallbacks(holdRunnable)
+                    if (holdingToTalk) {
+                        holdingToTalk = false
+                        stopAndTranscribe()
                     }
                     return true
                 }
@@ -265,24 +385,47 @@ class BubbleService : Service() {
         lastX = params?.x
         lastY = params?.y
         stopWaveAnimation()
+        snapAnimator?.cancel()
+        snapAnimator = null
         try {
             bubbleView?.let { windowManager?.removeView(it) }
         } catch (_: Exception) { }
         bubbleView = null
         micIcon = null
+        checkIcon = null
+        copiedText = null
         waveRow = null
+        waveBars = emptyList()
+        liveDot = null
         bubbleBg = null
         buildBubble()
     }
 
+    /** Settle against the nearest screen edge with a short spring overshoot. */
     private fun snapToEdge() {
         val p = params ?: return
         val widthPx = resources.displayMetrics.widthPixels
         val bubbleWidth = p.width
-        p.x = if (p.x + bubbleWidth / 2 < widthPx / 2) dp(10) else widthPx - bubbleWidth - dp(10)
-        lastX = p.x
-        lastY = p.y
-        try { windowManager?.updateViewLayout(bubbleView, p) } catch (_: Exception) { }
+        val targetX = if (p.x + bubbleWidth / 2 < widthPx / 2) dp(10) else widthPx - bubbleWidth - dp(10)
+        val startX = p.x
+        snapAnimator?.cancel()
+        if (startX == targetX) {
+            lastX = p.x
+            lastY = p.y
+            haptic()
+            return
+        }
+        snapAnimator = ValueAnimator.ofInt(startX, targetX).apply {
+            duration = 300
+            interpolator = OvershootInterpolator(0.8f)
+            addUpdateListener { anim ->
+                params?.x = anim.animatedValue as Int
+                lastX = params?.x
+                lastY = params?.y
+                try { windowManager?.updateViewLayout(bubbleView, params) } catch (_: Exception) { }
+            }
+            start()
+        }
         haptic()
     }
 
@@ -299,42 +442,115 @@ class BubbleService : Service() {
         } catch (_: Exception) { }
     }
 
-    private fun setBubbleAppearance(recording: Boolean, transcribing: Boolean) {
+    /** Two quick ticks for the Copied state. */
+    private fun hapticDouble() {
+        if (!prefs.haptic) return
+        try {
+            val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 12, 80, 12), -1))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(12)
+            }
+        } catch (_: Exception) { }
+    }
+
+    /**
+     * The single place state changes. Inserted shows the green check
+     * morphing in over 250 ms, then returns to Idle; Copied shows the
+     * pill for 1.5 s, then returns to Idle. A deferred bubble rebuild
+     * runs when the state settles back to Idle.
+     */
+    private fun setState(newState: BubbleState) {
+        resultResetJob?.cancel()
+        resultResetJob = null
+        val changed = state != newState
+        state = newState
+        if (changed) applyState()
+        when (newState) {
+            BubbleState.INSERTED -> {
+                haptic()
+                resultResetJob = scope.launch {
+                    delay(500)
+                    setState(BubbleState.IDLE)
+                }
+            }
+            BubbleState.COPIED -> {
+                hapticDouble()
+                resultResetJob = scope.launch {
+                    delay(1500)
+                    setState(BubbleState.IDLE)
+                }
+            }
+            BubbleState.IDLE -> {
+                if (pendingRebuild) {
+                    pendingRebuild = false
+                    rebuildBubble()
+                }
+            }
+            else -> { /* Recording / Transcribing have no timed reset. */ }
+        }
+    }
+
+    /** Draw the current state: colours, width, icon, waveform, check, pill. */
+    private fun applyState() {
         val bg = bubbleBg ?: return
         val sizePx = dp(prefs.bubbleSize)
         val colors = BUBBLE_COLORS[prefs.bubbleColor]
-        val stateColors = when {
-            recording -> intArrayOf(Color.parseColor("#EF4444"), Color.parseColor("#EF4444"))
+        val stateColors = when (state) {
+            BubbleState.RECORDING -> intArrayOf(Color.parseColor("#EF4444"), Color.parseColor("#EF4444"))
+            BubbleState.INSERTED -> intArrayOf(Color.parseColor("#16A34A"), Color.parseColor("#16A34A"))
             else -> intArrayOf(colors.first.toInt(), colors.second.toInt())
         }
         bg.colors = stateColors
-        val width = when {
-            recording || transcribing -> (sizePx * 1.9).toInt()
-            prefs.bubbleShape == "pill" -> (sizePx * 1.9).toInt()
-            else -> sizePx
+        val width = when (state) {
+            BubbleState.RECORDING, BubbleState.TRANSCRIBING, BubbleState.COPIED -> (sizePx * 1.9).toInt()
+            BubbleState.INSERTED -> sizePx
+            BubbleState.IDLE -> if (prefs.bubbleShape == "pill") (sizePx * 1.9).toInt() else sizePx
         }
         params?.width = width
         try { windowManager?.updateViewLayout(bubbleView, params) } catch (_: Exception) { }
-        micIcon?.visibility = if (recording || transcribing) View.GONE else View.VISIBLE
-        if (prefs.showWaveform && (recording || transcribing)) {
+        // Mic: idle, or recording with the waveform switched off.
+        micIcon?.visibility =
+            if (state == BubbleState.IDLE || (state == BubbleState.RECORDING && !prefs.showWaveform)) View.VISIBLE
+            else View.GONE
+        // Check: only in the Inserted state, morphing in over 250 ms.
+        if (state == BubbleState.INSERTED) {
+            checkIcon?.visibility = View.VISIBLE
+            checkIcon?.scaleX = 0.5f
+            checkIcon?.scaleY = 0.5f
+            ObjectAnimator.ofFloat(checkIcon, "scaleX", 0.5f, 1f).apply { duration = 250; start() }
+            ObjectAnimator.ofFloat(checkIcon, "scaleY", 0.5f, 1f).apply { duration = 250; start() }
+        } else {
+            checkIcon?.visibility = View.GONE
+        }
+        copiedText?.visibility = if (state == BubbleState.COPIED) View.VISIBLE else View.GONE
+        // Waveform: mic-driven while recording, looping while transcribing.
+        val showWave = prefs.showWaveform &&
+            (state == BubbleState.RECORDING || state == BubbleState.TRANSCRIBING)
+        if (showWave) {
             waveRow?.visibility = View.VISIBLE
-            startWaveAnimation()
+            liveDot?.visibility = if (state == BubbleState.RECORDING) View.VISIBLE else View.GONE
+            startWaveAnimation(micDriven = state == BubbleState.RECORDING)
         } else {
             waveRow?.visibility = View.GONE
             stopWaveAnimation()
-            if (!prefs.showWaveform && recording) micIcon?.visibility = View.VISIBLE
         }
         bubbleView?.invalidate()
     }
 
-    private fun startWaveAnimation() {
+    private fun startWaveAnimation(micDriven: Boolean) {
         stopWaveAnimation()
-        val row = waveRow ?: return
+        if (micDriven) {
+            startMicWavePoll()
+            return
+        }
+        if (waveRow == null) return
         // Seven bars on one shared ease-in-out curve, each starting a
         // fraction later — a smooth wave, not a mechanical tick. Runs
-        // while recording and while transcribing.
-        waveAnimators = (0 until row.childCount).map { i ->
-            val bar = row.getChildAt(i)
+        // while transcribing.
+        waveAnimators = waveBars.mapIndexed { i, bar ->
             ObjectAnimator.ofFloat(bar, "scaleY", 0.35f, 1.7f).apply {
                 duration = 650L
                 startDelay = i * 110L
@@ -346,7 +562,39 @@ class BubbleService : Service() {
         }
     }
 
+    /**
+     * Mic-driven waveform: every 55 ms the live level is read and the
+     * bars shift left, newest on the right. The level is smoothed with
+     * a fast attack (jump straight up, ~one poll) and a slow release
+     * (~200 ms decay), so the bars move fluidly and never jitter.
+     * Bar heights and the dot's brightness are set directly on the
+     * Views — draw-phase properties, no layout, no recomposition.
+     * The level array is a primitive FloatArray: nothing is allocated
+     * in this loop.
+     */
+    private fun startMicWavePoll() {
+        wavePollJob?.cancel()
+        waveLevels = FloatArray(7) { 0.2f }
+        smoothLevel = 0.2f
+        wavePollJob = scope.launch {
+            while (state == BubbleState.RECORDING) {
+                val raw = recorder?.amplitude() ?: 0.2f
+                smoothLevel = if (raw >= smoothLevel) raw
+                else smoothLevel + (raw - smoothLevel) * 0.24f
+                for (i in 0 until 6) waveLevels[i] = waveLevels[i + 1]
+                waveLevels[6] = smoothLevel
+                for (i in waveBars.indices) {
+                    waveBars[i].scaleY = 0.35f + waveLevels[i] * 1.35f
+                }
+                liveDot?.alpha = 0.3f + smoothLevel * 0.7f
+                delay(55)
+            }
+        }
+    }
+
     private fun stopWaveAnimation() {
+        wavePollJob?.cancel()
+        wavePollJob = null
         waveAnimators.forEach { try { it.cancel() } catch (_: Exception) { } }
         waveAnimators = emptyList()
     }
@@ -354,7 +602,7 @@ class BubbleService : Service() {
     private fun onBubbleTap() {
         haptic()
         when (state) {
-            BubbleState.IDLE -> startRecording()
+            BubbleState.IDLE, BubbleState.INSERTED, BubbleState.COPIED -> startRecording()
             BubbleState.RECORDING -> stopAndTranscribe()
             BubbleState.TRANSCRIBING -> { /* ignore taps while transcribing */ }
         }
@@ -374,65 +622,94 @@ class BubbleService : Service() {
         }
         recorder = rec
         recordingFile = file
-        state = BubbleState.RECORDING
-        setBubbleAppearance(recording = true, transcribing = false)
+        recordingHostPackage = OpenFlowAccessibilityService.currentHostPackage()
+        setState(BubbleState.RECORDING)
     }
 
     private fun stopAndTranscribe() {
         val rec = recorder ?: return
         val file = recordingFile ?: return
-        state = BubbleState.TRANSCRIBING
-        setBubbleAppearance(recording = false, transcribing = true)
-        val seconds = rec.stop(file)
         recorder = null
+        recordingFile = null
+        setState(BubbleState.TRANSCRIBING)
         scope.launch(Dispatchers.IO) {
+            // WAV finalisation (thread join + header write) happens off
+            // the main thread: tap-stop must return instantly.
+            val seconds = rec.stop(file)
             val key = KeyStore.getGroqKey(this@BubbleService)
             if (key.isNullOrBlank()) {
-                finishTranscription(null, "No Groq API key saved.")
+                withContext(Dispatchers.Main) {
+                    setState(BubbleState.IDLE)
+                    Toast.makeText(this@BubbleService, "No Groq API key saved.", Toast.LENGTH_LONG).show()
+                }
                 return@launch
             }
             when (val result = GroqClient.transcribe(key, file)) {
                 is TranscribeResult.Ok -> {
                     var text = result.text.trim()
+                    if (prefs.cleanTranscript) text = cleanTranscript(text)
                     if (prefs.autoPunctuation && text.isNotEmpty() && text.last() !in listOf('.', '!', '?')) {
                         text += "."
                     }
                     Store.addDictation(this@BubbleService, text, seconds.toInt())
-                    finishTranscription(text, null)
+                    val finalText = text
+                    withContext(Dispatchers.Main) { handleTranscribedText(finalText) }
                 }
-                is TranscribeResult.InvalidKey ->
-                    finishTranscription(null, "Groq key invalid — check it in Settings.")
-                is TranscribeResult.RateLimited ->
-                    finishTranscription(null, "Groq daily limit reached — try tomorrow.")
-                is TranscribeResult.Error ->
-                    finishTranscription(null, result.message)
+                is TranscribeResult.InvalidKey -> withContext(Dispatchers.Main) {
+                    setState(BubbleState.IDLE)
+                    Toast.makeText(this@BubbleService, "Groq key invalid — check it in Settings.", Toast.LENGTH_LONG).show()
+                }
+                is TranscribeResult.RateLimited -> withContext(Dispatchers.Main) {
+                    setState(BubbleState.IDLE)
+                    Toast.makeText(this@BubbleService, "Groq daily limit reached — try tomorrow.", Toast.LENGTH_LONG).show()
+                }
+                is TranscribeResult.Error -> withContext(Dispatchers.Main) {
+                    setState(BubbleState.IDLE)
+                    Toast.makeText(this@BubbleService, result.message, Toast.LENGTH_LONG).show()
+                }
             }
         }
     }
 
-    private fun finishTranscription(text: String?, error: String?) {
-        scope.launch(Dispatchers.Main) {
-            state = BubbleState.IDLE
-            setBubbleAppearance(recording = false, transcribing = false)
-            if (pendingRebuild) {
-                pendingRebuild = false
-                rebuildBubble()
+    /** Route a finished transcription: review screen when enabled, insert otherwise. */
+    private fun handleTranscribedText(text: String) {
+        if (text.isBlank()) {
+            setState(BubbleState.IDLE)
+            Toast.makeText(this, "No text was transcribed.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (prefs.reviewBeforeInsert) {
+            setState(BubbleState.IDLE)
+            val intent = Intent(this, ReviewActivity::class.java).apply {
+                putExtra(ReviewActivity.EXTRA_TEXT, text)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            if (error != null) {
-                Toast.makeText(this@BubbleService, error, Toast.LENGTH_LONG).show()
-                return@launch
+            try {
+                startActivity(intent)
+            } catch (_: Exception) {
+                // Review screen could not open — fall back to auto-insert.
+                insertTranscribedText(text)
             }
-            if (text.isNullOrBlank()) {
-                Toast.makeText(this@BubbleService, "No text was transcribed.", Toast.LENGTH_LONG).show()
-                return@launch
-            }
-            val inserted = OpenFlowAccessibilityService.insertText(this@BubbleService, text)
-            if (inserted) {
-                Toast.makeText(this@BubbleService, "Inserted", Toast.LENGTH_SHORT).show()
-            } else {
-                OpenFlowAccessibilityService.copyToClipboard(this@BubbleService, text)
-                Toast.makeText(this@BubbleService, "Copied — long-press the field and tap Paste", Toast.LENGTH_LONG).show()
-            }
+            return
+        }
+        insertTranscribedText(text)
+    }
+
+    private fun insertTranscribedText(text: String) {
+        OpenFlowAccessibilityService.requestInsert(this, text, recordingHostPackage) { inserted ->
+            deliverInsertResult(text, inserted)
+        }
+    }
+
+    private fun deliverInsertResult(text: String, inserted: Boolean) {
+        recordingHostPackage = null
+        if (inserted) {
+            setState(BubbleState.INSERTED)
+            Toast.makeText(this, "Inserted", Toast.LENGTH_SHORT).show()
+        } else {
+            OpenFlowAccessibilityService.copyToClipboard(this, text)
+            setState(BubbleState.COPIED)
+            Toast.makeText(this, "Copied — long-press the field and tap Paste", Toast.LENGTH_LONG).show()
         }
     }
 }
