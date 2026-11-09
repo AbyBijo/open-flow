@@ -3,10 +3,18 @@ package com.abybijo.openflow
 import android.content.Context
 import com.abybijo.openflow.whisper.WhisperEngine
 import java.io.File
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+
+/** On-device Whisper works in 30-second windows. */
+private const val LOCAL_CHUNK_SECONDS = 30L
+/** Groq takes at most 25 MB per file; 600 s of 16 kHz mono is 19.2 MB, safely under. */
+private const val GROQ_CHUNK_SECONDS = 600L
+private const val GROQ_SINGLE_MAX_BYTES = 20L * 1024L * 1024L
 
 /**
  * One speech-to-text engine behind one function, so the bubble, the
@@ -32,6 +40,13 @@ class GroqEngine(private val key: String) : SttEngine {
  * result and whether Groq was the engine that produced it (usage
  * accounting counts Groq only). [onFallback] reports the switch so
  * the caller can tell the user.
+ *
+ * Long recordings are chunked, never cut: on-device audio is split
+ * into 30-second chunks (Whisper's window) and Groq audio into
+ * 600-second chunks (under its 25 MB file limit), then merged in
+ * order. Short recordings take the single-call path, exactly as
+ * before. A chunk is never dropped silently — if any chunk fails,
+ * the whole transcription reports the failure.
  */
 suspend fun transcribeWithFallback(
     context: Context,
@@ -41,7 +56,7 @@ suspend fun transcribeWithFallback(
     onFallback: (suspend (String) -> Unit)? = null
 ): Pair<TranscribeResult, Boolean> {
     if (engine == "local") {
-        when (val local = LocalWhisperEngine(context, modelId).transcribe(wavFile)) {
+        when (val local = transcribeLocalInChunks(context, modelId, wavFile)) {
             is TranscribeResult.Ok -> return local to false
             is TranscribeResult.LocalModelMissing -> {
                 onFallback?.invoke("On-device model not downloaded — used Groq instead.")
@@ -52,9 +67,137 @@ suspend fun transcribeWithFallback(
             else -> { /* InvalidKey/RateLimited cannot come from local; fall through to Groq. */ }
         }
     }
+    return transcribeGroqInChunks(context, wavFile)
+}
+
+/** Length of a 16 kHz mono 16-bit WAV in whole seconds, from its file size. */
+private fun wavDurationSeconds(wavFile: File): Long {
+    val pcmBytes = (wavFile.length() - 44).coerceAtLeast(0)
+    return pcmBytes / (WavRecorder.SAMPLE_RATE * 2)
+}
+
+/** On-device transcription of any length, chunked at 30 seconds and merged in order. */
+private suspend fun transcribeLocalInChunks(
+    context: Context,
+    modelId: String,
+    wavFile: File
+): TranscribeResult {
+    if (wavDurationSeconds(wavFile) <= LOCAL_CHUNK_SECONDS) {
+        return LocalWhisperEngine(context, modelId).transcribe(wavFile)
+    }
+    val chunks = withContext(Dispatchers.IO) { splitWav(context, wavFile, LOCAL_CHUNK_SECONDS) }
+    if (chunks.isEmpty()) return TranscribeResult.Error("No audio was recorded.")
+    try {
+        val engine = LocalWhisperEngine(context, modelId)
+        val parts = mutableListOf<String>()
+        for (chunk in chunks) {
+            when (val r = engine.transcribe(chunk)) {
+                is TranscribeResult.Ok -> if (r.text.isNotBlank()) parts.add(r.text)
+                is TranscribeResult.LocalModelMissing -> return TranscribeResult.LocalModelMissing
+                is TranscribeResult.Error -> return r
+                else -> return TranscribeResult.Error("On-device transcription failed.")
+            }
+        }
+        val merged = parts.joinToString(" ").trim()
+        return if (merged.isBlank()) TranscribeResult.Error("Didn't catch that. Please try speaking again.")
+        else TranscribeResult.Ok(merged)
+    } finally {
+        chunks.forEach { try { it.delete() } catch (_: Exception) { } }
+    }
+}
+
+/** Groq transcription of any length, chunked under the 25 MB file limit and merged in order. */
+private suspend fun transcribeGroqInChunks(
+    context: Context,
+    wavFile: File
+): Pair<TranscribeResult, Boolean> {
     val key = KeyStore.getGroqKey(context)
         ?: return TranscribeResult.Error("No Groq API key saved. Add one in Settings.") to true
-    return GroqClient.transcribe(key, wavFile) to true
+    if (wavFile.length() <= GROQ_SINGLE_MAX_BYTES) {
+        return GroqClient.transcribe(key, wavFile) to true
+    }
+    val chunks = withContext(Dispatchers.IO) { splitWav(context, wavFile, GROQ_CHUNK_SECONDS) }
+    if (chunks.isEmpty()) return TranscribeResult.Error("No audio was recorded.") to true
+    try {
+        val parts = mutableListOf<String>()
+        for (chunk in chunks) {
+            when (val r = GroqClient.transcribe(key, chunk)) {
+                is TranscribeResult.Ok -> if (r.text.isNotBlank()) parts.add(r.text)
+                else -> return r to true
+            }
+        }
+        val merged = parts.joinToString(" ").trim()
+        return if (merged.isBlank()) TranscribeResult.Error("Didn't catch that. Please try speaking again.") to true
+        else TranscribeResult.Ok(merged) to true
+    } finally {
+        chunks.forEach { try { it.delete() } catch (_: Exception) { } }
+    }
+}
+
+/**
+ * Split a 16 kHz mono WAV into chunk WAVs of [chunkSeconds] each,
+ * written to the cache dir. Boundaries fall on exact sample
+ * boundaries, so no audio is dropped or duplicated; a word cut by a
+ * boundary may come back partial in one chunk, but every word the
+ * engine hears is kept, in order. The caller deletes the chunks.
+ * File I/O is streamed (never the whole file in memory).
+ */
+private fun splitWav(context: Context, wavFile: File, chunkSeconds: Long): List<File> {
+    val bytesPerSecond = (WavRecorder.SAMPLE_RATE * 2).toLong()
+    val chunkBytes = chunkSeconds * bytesPerSecond
+    val totalPcm = (wavFile.length() - 44).coerceAtLeast(0)
+    if (totalPcm <= 0L) return emptyList()
+    val chunks = mutableListOf<File>()
+    var offset = 0L
+    var index = 0
+    try {
+        RandomAccessFile(wavFile, "r").use { raf ->
+            while (offset < totalPcm) {
+                val thisChunk = minOf(chunkBytes, totalPcm - offset)
+                val out = File(context.cacheDir, "chunk_${System.currentTimeMillis()}_$index.wav")
+                FileOutputStream(out).use { o ->
+                    o.write(wavHeader(thisChunk.toInt()))
+                    raf.seek(44 + offset)
+                    val buf = ByteArray(64 * 1024)
+                    var remaining = thisChunk
+                    while (remaining > 0) {
+                        val read = raf.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
+                        if (read < 0) break
+                        o.write(buf, 0, read)
+                        remaining -= read
+                    }
+                }
+                chunks.add(out)
+                offset += thisChunk
+                index++
+            }
+        }
+    } catch (_: Exception) {
+        chunks.forEach { try { it.delete() } catch (_: Exception) { } }
+        return emptyList()
+    }
+    return chunks
+}
+
+/** A plain 44-byte PCM WAV header for [pcmBytes] of 16 kHz mono audio. */
+private fun wavHeader(pcmBytes: Int): ByteArray {
+    val total = pcmBytes + 36
+    val byteRate = WavRecorder.SAMPLE_RATE * 2
+    val buf = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
+    buf.put("RIFF".toByteArray())
+    buf.putInt(total)
+    buf.put("WAVE".toByteArray())
+    buf.put("fmt ".toByteArray())
+    buf.putInt(16)
+    buf.putShort(1.toShort()) // PCM
+    buf.putShort(1.toShort()) // mono
+    buf.putInt(WavRecorder.SAMPLE_RATE)
+    buf.putInt(byteRate)
+    buf.putShort(2.toShort()) // block align
+    buf.putShort(16.toShort()) // bits per sample
+    buf.put("data".toByteArray())
+    buf.putInt(pcmBytes)
+    return buf.array()
 }
 
 /** Free the cached on-device model (engine switch, service shutdown). */

@@ -7,6 +7,7 @@ import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.animateColorAsState
@@ -27,7 +28,6 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -60,6 +60,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -90,11 +92,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -327,7 +328,7 @@ fun HistoryTile(entry: RecentEntry, onClick: () -> Unit) {
         Column(modifier = Modifier.padding(18.dp)) {
             Text(entry.text, fontSize = 16.sp)
             Text(
-                formatRecentTime(entry.timestamp),
+                formatEntryTime(entry.timestamp),
                 fontSize = 13.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 modifier = Modifier.padding(top = 4.dp)
@@ -377,61 +378,52 @@ fun ProgressDots(current: Int, total: Int = 5) {
     }
 }
 
-@Composable
-fun UsageRing(percent: Int, size: Dp = 84.dp) {
-    val track = MaterialTheme.colorScheme.surfaceVariant
-    val sweep by animateFloatAsState(
-        targetValue = 360f * (percent.coerceIn(0, 100) / 100f),
-        animationSpec = tween(900, easing = FastOutSlowInEasing), label = "usageRing"
-    )
-    Box(
-        modifier = Modifier
-            .size(size)
-            .semantics(mergeDescendants = true) {
-                contentDescription = "$percent percent of today’s free dictation used"
-            },
-        contentAlignment = Alignment.Center
-    ) {
-        Canvas(modifier = Modifier.size(size)) {
-            val stroke = 8.dp.toPx()
-            drawArc(
-                color = track,
-                startAngle = -90f, sweepAngle = 360f, useCenter = false,
-                style = Stroke(width = stroke, cap = StrokeCap.Round)
-            )
-            if (sweep > 0f) {
-                drawArc(
-                    color = Accent,
-                    startAngle = -90f, sweepAngle = sweep, useCenter = false,
-                    style = Stroke(width = stroke, cap = StrokeCap.Round)
-                )
-            }
-        }
-        Text("$percent%", fontSize = 15.sp, fontWeight = FontWeight.Bold)
-    }
+/** "7:42 PM" — just the time; the day lives in the history section header. */
+fun formatEntryTime(timestamp: Long): String {
+    return SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(timestamp))
 }
 
-fun greeting(): String {
-    return when (Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) {
-        in 0..11 -> "Good morning"
-        in 12..17 -> "Good afternoon"
-        else -> "Good evening"
-    }
-}
-
-/** "Today, 7:42 PM" for today's entries, otherwise "8 Nov, 7:42 PM". Device locale, 12-hour clock. */
-fun formatRecentTime(timestamp: Long): String {
+/** Day label for history grouping: "Today", "Yesterday", or "8 Nov". */
+fun dayLabel(timestamp: Long): String {
     val entry = Calendar.getInstance().apply { timeInMillis = timestamp }
     val now = Calendar.getInstance()
-    val timePart = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(timestamp))
     val sameDay = now.get(Calendar.YEAR) == entry.get(Calendar.YEAR) &&
         now.get(Calendar.DAY_OF_YEAR) == entry.get(Calendar.DAY_OF_YEAR)
-    return if (sameDay) {
-        "Today, $timePart"
-    } else {
-        val datePart = SimpleDateFormat("d MMM", Locale.getDefault()).format(Date(timestamp))
-        "$datePart, $timePart"
+    if (sameDay) return "Today"
+    val yesterday = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
+    val isYesterday = yesterday.get(Calendar.YEAR) == entry.get(Calendar.YEAR) &&
+        yesterday.get(Calendar.DAY_OF_YEAR) == entry.get(Calendar.DAY_OF_YEAR)
+    if (isYesterday) return "Yesterday"
+    return SimpleDateFormat("d MMM", Locale.getDefault()).format(Date(timestamp))
+}
+
+/** Words in a dictation: whitespace-separated tokens, blanks ignored. */
+fun countWords(text: String): Int =
+    text.split("\\s+".toRegex()).count { it.isNotBlank() }
+
+/** Words per minute: words in entries that have a recorded duration, divided by those entries' total minutes. Entries saved before 2.4.0 have no duration and are left out of both sides. Null when there is nothing to measure yet. */
+fun wordsPerMinute(entries: List<RecentEntry>): Int? {
+    val measured = entries.filter { it.seconds > 0 }
+    val totalSeconds = measured.sumOf { it.seconds }
+    if (totalSeconds <= 0) return null
+    val words = measured.sumOf { countWords(it.text) }
+    return (words / (totalSeconds / 60f)).toInt().coerceAtLeast(0)
+}
+
+/** "7h 12m left", "42 min left", "38 sec left" — time left of the 8 free Groq hours. */
+fun formatRemaining(secondsLeft: Int): String {
+    val s = secondsLeft.coerceAtLeast(0)
+    return when {
+        s >= 3600 -> "${s / 3600}h ${(s % 3600) / 60}m left"
+        s >= 60 -> "${s / 60} min left"
+        else -> "$s sec left"
     }
+}
+
+/** "48 min" / "9.5 min" for the usage subtitle. */
+fun formatMinutes(seconds: Int): String {
+    val minutes = seconds / 60f
+    return if (minutes >= 10) "${minutes.toInt()} min" else "%.1f min".format(minutes)
 }
 
 // ---------- App root ----------
@@ -461,7 +453,7 @@ fun OpenFlowApp(
     // also persisted to DataStore for the cases where saved state is gone
     // (e.g. the process was killed while the user was in Settings).
     var route by rememberSaveable(saver = routeStateSaver) {
-        mutableStateOf(if (prefs.onboardingDone) Route.Home else Route.Onboarding(prefs.onboardingStep.coerceIn(0, 4)))
+        mutableStateOf(if (prefs.onboardingDone) Route.Home else Route.Onboarding(prefs.onboardingStep.coerceIn(0, 5)))
     }
     // Every onboarding step change is written to DataStore as well as the
     // navigation state, so the step survives even without saved state.
@@ -469,19 +461,34 @@ fun OpenFlowApp(
         route = Route.Onboarding(step)
         vm.setOnboardingStep(step)
     }
+    // The route must never render before it has been corrected for the
+    // loaded prefs. The rememberSaveable initialiser above runs on the
+    // very first composition — when prefs still hold the default
+    // (onboarding not done) — so for a returning user it starts out as
+    // Onboarding(0) and only flips to Home in an effect afterwards.
+    // That one frame was the onboarding flash: the onboarding screen
+    // rendered once, after the logo splash, before Home. So nothing
+    // renders until this effect has run and the route matches the
+    // stored prefs; until then the branded splash stays up.
+    var routeSynced by rememberSaveable { mutableStateOf(false) }
     // If saved instance state is gone (fresh launch after the process was
     // killed), fall back to the onboarding step stored in DataStore.
     var routeRestored by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(prefsReady) {
         if (prefsReady && !routeRestored) {
             routeRestored = true
-            if (!prefs.onboardingDone) {
-                val savedStep = prefs.onboardingStep.coerceIn(0, 4)
+            if (prefs.onboardingDone) {
+                if (route is Route.Onboarding) route = Route.Home
+            } else {
+                val savedStep = prefs.onboardingStep.coerceIn(0, 5)
                 val current = route
-                if (current is Route.Onboarding && current.step == 0 && savedStep != 0) {
+                if (current is Route.Onboarding && current.step != savedStep) {
+                    route = Route.Onboarding(savedStep)
+                } else if (current !is Route.Onboarding) {
                     route = Route.Onboarding(savedStep)
                 }
             }
+            routeSynced = true
         }
     }
     // Once onboarding completes, move to Home.
@@ -490,10 +497,12 @@ fun OpenFlowApp(
     }
     // System Back: step back through onboarding, Demo/About/ChangeKey to
     // their parent screen, Settings to Home. Home keeps the default
-    // behaviour (exits the app).
+    // behaviour (exits the app). Onboarding back is path-aware: the
+    // on-device path has no key or consent step, so back from
+    // Permissions goes to the model step, not to the key screen.
     val backAction: (() -> Unit)? = when (val r = route) {
-        is Route.Onboarding -> if (r.step > 0) ({ goToStep(r.step - 1) }) else null
-        Route.Demo -> ({ route = Route.Home })
+        is Route.Onboarding -> if (r.step > 0) ({ goToStep(previousOnboardingStep(r.step, prefs.onboardingEngine)) }) else null
+        Route.Demo -> ({ route = Route.Settings })
         Route.About -> ({ route = Route.Settings })
         Route.ChangeKey -> ({ route = Route.Settings })
         Route.Settings -> ({ route = Route.Home })
@@ -502,11 +511,11 @@ fun OpenFlowApp(
     BackHandler(enabled = backAction != null) { backAction?.invoke() }
     OpenFlowTheme(isDark = isDark) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            // Until the stored preferences have actually loaded, show a
-            // branded splash. Without this the first frame uses the default
-            // prefs (onboarding not done) and flashes onboarding before
-            // jumping to Home.
-            if (!prefsReady) {
+            // Until the stored preferences have actually loaded AND the
+            // route has been corrected for them, show a branded splash.
+            // Rendering the route any earlier flashes onboarding for
+            // returning users (see the routeSynced note above).
+            if (!prefsReady || !routeSynced) {
                 SplashScreen()
                 return@Surface
             }
@@ -536,6 +545,7 @@ fun OpenFlowApp(
                 is Route.Onboarding -> OnboardingScreen(
                     step = r.step,
                     vm = vm,
+                    prefs = prefs,
                     micGranted = micGranted,
                     overlayGranted = overlayGranted,
                     a11yGranted = a11yGranted,
@@ -578,7 +588,7 @@ fun OpenFlowApp(
                     onAbout = { route = Route.About },
                     onChangeKey = { route = Route.ChangeKey }
                 )
-                Route.Demo -> DemoScreen(vm = vm, onClose = { route = Route.Home }, onRequestMic = onRequestMic, micGranted = micGranted, onToast = onToast)
+                Route.Demo -> DemoScreen(vm = vm, onClose = { route = Route.Settings }, onRequestMic = onRequestMic, micGranted = micGranted, onToast = onToast)
                 Route.About -> AboutScreen(onBack = { route = Route.Settings }, onOpenUrl = onOpenUrl)
                 Route.ChangeKey -> Column(
                     modifier = Modifier
@@ -623,7 +633,7 @@ private fun encodeRoute(route: Route): String = when (route) {
 
 private fun decodeRoute(encoded: String): Route = when {
     encoded.startsWith("onboarding:") ->
-        Route.Onboarding(encoded.removePrefix("onboarding:").toIntOrNull()?.coerceIn(0, 4) ?: 0)
+        Route.Onboarding(encoded.removePrefix("onboarding:").toIntOrNull()?.coerceIn(0, 5) ?: 0)
     encoded == "settings" -> Route.Settings
     encoded == "demo" -> Route.Demo
     encoded == "about" -> Route.About
@@ -642,9 +652,21 @@ private fun isTabRoute(route: Route): Boolean = route == Route.Home || route == 
 /** Deeper in the app = higher number. Used to pick the slide direction. */
 private fun routeDepth(route: Route): Int = when (route) {
     is Route.Onboarding -> route.step
-    Route.Home -> 5
-    Route.Settings -> 6
-    Route.Demo, Route.About, Route.ChangeKey -> 7
+    Route.Home -> 6
+    Route.Settings -> 7
+    Route.Demo, Route.About, Route.ChangeKey -> 8
+}
+
+/**
+ * Back step inside onboarding, aware of which path the user picked.
+ * The Groq path is 0 Welcome, 1 choice, 2 Get key, 3 Consent, 4 Key,
+ * 5 Permissions. The on-device path skips Consent and Key, so back
+ * from Permissions (5) goes to the model step (2), never to the key
+ * screen. A user who never picked is on the Groq path by default.
+ */
+private fun previousOnboardingStep(step: Int, engineChoice: String): Int = when (step) {
+    5 -> if (engineChoice == "local") 2 else 4
+    else -> (step - 1).coerceAtLeast(0)
 }
 
 /** Branded launch splash: logo and name only, shown while stored prefs load. */
@@ -681,6 +703,7 @@ fun SplashScreen() {
 fun OnboardingScreen(
     step: Int,
     vm: MainViewModel,
+    prefs: Prefs,
     micGranted: Boolean,
     overlayGranted: Boolean,
     a11yGranted: Boolean,
@@ -707,12 +730,20 @@ fun OnboardingScreen(
             .imePadding()
             .padding(horizontal = 22.dp)
     ) {
+        // Onboarding is a fork, not a funnel: step 1 asks how OpenFlow
+        // should listen, and the two paths never force each other. Groq
+        // path: 2 Get key, 3 Consent, 4 Key, 5 Permissions. On-device
+        // path: 2 Download a model, 5 Permissions. Steps 3 and 4 do not
+        // exist on the on-device path — if stale state ever lands there,
+        // the model step is shown instead of a key screen.
+        val isLocal = prefs.onboardingEngine == "local"
         when (step) {
             0 -> WelcomeStep(onStep)
-            1 -> GetKeyStep(onStep, onOpenUrl)
-            2 -> ConsentStep(onStep)
-            3 -> KeyScreen(vm = vm, isChange = false, onDone = { onStep(4) }, onBack = { onStep(2) })
-            4 -> PermissionsStep(
+            1 -> EngineChoiceStep(vm, onStep)
+            2 -> if (isLocal) ModelDownloadStep(vm, onStep) else GetKeyStep(onStep, onOpenUrl)
+            3 -> if (isLocal) ModelDownloadStep(vm, onStep) else ConsentStep(onStep)
+            4 -> if (isLocal) ModelDownloadStep(vm, onStep) else KeyScreen(vm = vm, isChange = false, onDone = { onStep(5) }, onBack = { onStep(3) })
+            else -> PermissionsStep(
                 micGranted = micGranted,
                 overlayGranted = overlayGranted,
                 a11yGranted = a11yGranted,
@@ -747,7 +778,7 @@ fun WelcomeStep(onStep: (Int) -> Unit) {
         }
         AnimItem(2) {
             Text(
-                "Dictate in any app with a floating bubble, powered by your own free Groq key.",
+                "Dictate in any app with a floating bubble — with your own free Groq key, or fully on-device with no key at all.",
                 fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
                 textAlign = TextAlign.Center, modifier = Modifier.padding(vertical = 14.dp)
             )
@@ -773,10 +804,165 @@ fun WelcomeStep(onStep: (Int) -> Unit) {
 }
 
 @Composable
+fun EngineChoiceStep(vm: MainViewModel, onStep: (Int) -> Unit) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            AnimItem(0) { ProgressDots(current = 2, total = 6) }
+            AnimItem(1) {
+                Text("How should OpenFlow listen?", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp))
+            }
+            AnimItem(2) {
+                Text("Pick one. The other path is never forced on you — you can switch in Settings later.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f), modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
+            }
+            AnimItem(3) {
+                AppCard(onClick = {
+                    vm.setEngine("groq")
+                    vm.setOnboardingEngine("groq")
+                    onStep(2)
+                }) {
+                    Row(verticalAlignment = Alignment.Top) {
+                        IconTile(R.drawable.ic_key)
+                        Spacer(Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Groq API key", fontWeight = FontWeight.Bold)
+                            Text(
+                                "Fast and accurate. Your audio is sent to Groq with your own free key — up to 8 hours a day, free. Needs internet.",
+                                fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                            )
+                        }
+                    }
+                }
+            }
+            AnimItem(4) {
+                AppCard(onClick = {
+                    vm.setEngine("local")
+                    vm.setOnboardingEngine("local")
+                    onStep(2)
+                }) {
+                    Row(verticalAlignment = Alignment.Top) {
+                        IconTile(R.drawable.ic_download)
+                        Spacer(Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("On-device model", fontWeight = FontWeight.Bold)
+                            Text(
+                                "Fully private and offline. A Whisper model runs on your phone — no key, no account, no internet needed after the download.",
+                                fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
+fun ModelDownloadStep(vm: MainViewModel, onStep: (Int) -> Unit) {
+    val context = LocalContext.current
+    val downloadStates by vm.downloadStates.collectAsState()
+    // The phone's RAM decides which models can actually run — read once,
+    // it never changes while this screen is open.
+    val totalRam = remember { totalRamBytes(context) }
+    val lowRam = remember { isLowRamDevice(context) }
+    val recommended = remember(totalRam, lowRam) { ModelCatalog.recommend(totalRam, lowRam) }
+    var chosenId by rememberSaveable { mutableStateOf(recommended?.id ?: ModelCatalog.DEFAULT_MODEL_ID) }
+    val chosen = ModelCatalog.byId(chosenId)
+    val chosenState = downloadStates[chosen.id] ?: ModelDownloadState.NotDownloaded
+    val ready = chosenState is ModelDownloadState.Downloaded
+    val chosenFits = chosen.fits(totalRam, lowRam)
+    Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            AnimItem(0) { ProgressDots(current = 3, total = 6) }
+            AnimItem(1) {
+                Text("Download a model", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp))
+            }
+            AnimItem(2) {
+                Text(
+                    if (recommended != null) "Best for your phone: ${recommended.name} — your phone has ${formatRamGb(totalRam)} RAM." else "Your phone has ${formatRamGb(totalRam)} RAM.",
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                    modifier = Modifier.padding(top = 4.dp, bottom = 14.dp)
+                )
+            }
+            AnimItem(3) {
+                AppCard {
+                    Row(verticalAlignment = Alignment.Top) {
+                        IconTile(R.drawable.ic_lock)
+                        Spacer(Modifier.width(14.dp))
+                        Column {
+                            Text("Nothing leaves your phone", fontWeight = FontWeight.Bold)
+                            Text("No key, no account, no internet needed after the download. The model lives on this phone only.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                        }
+                    }
+                }
+            }
+            AnimItem(4) {
+                Text("Models", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
+                ModelCatalog.all.forEach { model ->
+                    val state = downloadStates[model.id] ?: ModelDownloadState.NotDownloaded
+                    ModelRow(
+                        model = model,
+                        state = state,
+                        selected = chosenId == model.id,
+                        fits = model.fits(totalRam, lowRam),
+                        fitReason = if (model.fits(totalRam, lowRam)) null else model.ramShortfall(totalRam),
+                        isRecommended = recommended?.id == model.id,
+                        onSelect = {
+                            chosenId = model.id
+                            if (state is ModelDownloadState.Downloaded) vm.setLocalModel(model.id)
+                        },
+                        onDownload = {
+                            chosenId = model.id
+                            vm.downloadModel(model.id)
+                        },
+                        onPause = { vm.pauseDownload(model.id) },
+                        onCancel = { vm.cancelDownload(model.id) },
+                        onDelete = { vm.deleteModel(model.id) }
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
+                Text(
+                    "Models that do not fit your phone's memory are greyed out — downloading one would finish and then fail the first time you dictate.",
+                    fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        AnimItem(5) {
+            GradientButton(
+                text = when {
+                    !chosenFits -> "${chosen.name} doesn't fit this phone"
+                    ready -> "Continue"
+                    else -> "Download ${chosen.name} to continue"
+                },
+                onClick = {
+                    if (!ready) {
+                        vm.downloadModel(chosen.id)
+                        return@GradientButton
+                    }
+                    vm.setLocalModel(chosen.id)
+                    onStep(5)
+                },
+                enabled = chosenFits
+            )
+            if (!ready && chosenFits) {
+                Text(
+                    "Tap Continue once the download lands.",
+                    fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
 fun GetKeyStep(onStep: (Int) -> Unit, onOpenUrl: (String) -> Unit) {
     Column(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            AnimItem(0) { ProgressDots(current = 2) }
+            AnimItem(0) { ProgressDots(current = 3, total = 6) }
             AnimItem(1) {
                 Text("Get your free Groq key", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp))
             }
@@ -810,7 +996,7 @@ fun GetKeyStep(onStep: (Int) -> Unit, onOpenUrl: (String) -> Unit) {
             Spacer(Modifier.height(8.dp))
         }
         AnimItem(5) {
-            GradientButton(text = "I have my key", onClick = { onStep(2) })
+            GradientButton(text = "I have my key", onClick = { onStep(3) })
         }
         Spacer(Modifier.height(8.dp))
     }
@@ -821,7 +1007,7 @@ fun ConsentStep(onStep: (Int) -> Unit) {
     var checked by rememberSaveable { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            AnimItem(0) { ProgressDots(current = 3) }
+            AnimItem(0) { ProgressDots(current = 4, total = 6) }
             AnimItem(1) {
                 Text("Your audio and Groq", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp))
             }
@@ -880,7 +1066,7 @@ fun ConsentStep(onStep: (Int) -> Unit) {
         }
         AnimItem(7) {
             Box(modifier = Modifier.fillMaxWidth()) {
-                GradientButton(text = "Continue", onClick = { onStep(3) }, enabled = checked)
+                GradientButton(text = "Continue", onClick = { onStep(4) }, enabled = checked)
                 if (!checked) {
                     Box(modifier = Modifier.matchParentSize().background(Color.Transparent))
                 }
@@ -913,7 +1099,7 @@ fun KeyScreen(vm: MainViewModel, isChange: Boolean, onDone: () -> Unit, onBack: 
     }
     Column(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            if (!isChange) AnimItem(0) { ProgressDots(current = 4) }
+            if (!isChange) AnimItem(0) { ProgressDots(current = 5, total = 6) }
             AnimItem(1) {
                 Text(
                     if (isChange) "Change your Groq API key" else "Paste your API key",
@@ -1040,7 +1226,7 @@ fun PermissionsStep(
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            AnimItem(0) { ProgressDots(current = 5) }
+            AnimItem(0) { ProgressDots(current = 6, total = 6) }
             AnimItem(1) {
                 Text("Two quick permissions", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp))
             }
@@ -1161,9 +1347,9 @@ fun MainScreen(
                 .padding(22.dp)
         ) {
             if (tab == 0) {
-                HomeContent(vm, prefs, onDemo, onCopyText, onStartBubble, onStopBubble, onToast, a11yGranted, onOpenA11ySettings, onOpenAppInfo)
+                HomeContent(vm, prefs, onCopyText, onStartBubble, onStopBubble, onToast, a11yGranted, onOpenA11ySettings, onOpenAppInfo)
             } else {
-                SettingsContent(vm, prefs, context, onAbout, onChangeKey)
+                SettingsContent(vm, prefs, context, onDemo, onAbout, onChangeKey)
             }
         }
         // Bottom tabs, matching the HTML: pill highlight on the active tab.
@@ -1303,7 +1489,6 @@ fun RestrictedSettingsHelp(onOpenAppInfo: () -> Unit) {
 fun HomeContent(
     vm: MainViewModel,
     prefs: Prefs,
-    onDemo: () -> Unit,
     onCopyText: (String) -> Unit,
     onStartBubble: () -> Unit,
     onStopBubble: () -> Unit,
@@ -1314,7 +1499,12 @@ fun HomeContent(
 ) {
     Column {
         AnimItem(0) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // Centred header: icon immediately left of the name.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Image(
                     painter = painterResource(R.drawable.openflow_logo),
                     contentDescription = "OpenFlow logo",
@@ -1322,10 +1512,7 @@ fun HomeContent(
                     contentScale = ContentScale.Crop
                 )
                 Spacer(Modifier.width(12.dp))
-                Column {
-                    Text(greeting(), fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
-                    Text("OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, lineHeight = 28.sp)
-                }
+                Text("OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, lineHeight = 28.sp)
             }
         }
         if (!a11yGranted) {
@@ -1378,63 +1565,137 @@ fun HomeContent(
             }
         }
         AnimItem(3) {
-            val minutes = prefs.usageSeconds / 60
-            val percent = ((prefs.usageSeconds / 28800f) * 100).toInt().coerceIn(0, 100)
-            AppCard {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    UsageRing(percent = percent)
-                    Spacer(Modifier.width(18.dp))
-                    Column {
-                        Text("Free usage today", fontWeight = FontWeight.Bold)
-                        Text(
-                            if (prefs.usageSeconds < 60) "${prefs.usageSeconds} sec of 8 hours" else "$minutes min of 8 hours",
-                            fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                        )
-                    }
-                }
-            }
+            Spacer(Modifier.height(6.dp))
+            StatTabs(prefs)
         }
         AnimItem(4) {
-            Spacer(Modifier.height(6.dp))
-            GradientButton(text = "Try the bubble", onClick = onDemo, iconRes = R.drawable.ic_arrow_right)
-        }
-        AnimItem(5) {
-            AppCard {
-                Text("How to dictate", fontWeight = FontWeight.Bold)
-                Text(
-                    "Tap the bubble in any text field, speak, then tap again. Your words appear as text.",
-                    fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                )
-            }
-        }
-        AnimItem(6) {
-            SectionLabel("Recent")
+            SectionLabel("Dictation history")
             if (prefs.recent.isEmpty()) {
                 Text(
-                    "Nothing yet. Try the bubble above.",
+                    "Nothing yet. Tap the bubble to dictate.",
                     fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
                     modifier = Modifier.padding(horizontal = 6.dp)
                 )
             }
         }
         if (prefs.recent.isNotEmpty()) {
-            // Each tile animates in on its own, one after another, so the
-            // list reads as tiles stacked below each other — never as one
-            // block sliding in from behind. The stagger is capped so a
-            // long list does not keep late tiles waiting for seconds.
-            // Keyed by timestamp: adding a dictation composes and animates
-            // only the new tile — existing tiles keep their state and
-            // never re-animate or jump.
-            prefs.recent.forEachIndexed { index, entry ->
-                key(entry.timestamp) {
-                    AnimItem(7 + minOf(index, 12)) {
-                        HistoryTile(entry = entry, onClick = { onCopyText(entry.text) })
+            // Grouped by day at display time — the stored list never
+            // changes. Newest day first; scrolling down reveals older
+            // days. Each tile is keyed by timestamp, so adding a
+            // dictation composes and animates only the new tile.
+            val grouped = prefs.recent.groupBy { dayLabel(it.timestamp) }
+            grouped.forEach { (day, entries) ->
+                SectionLabel(day)
+                entries.forEachIndexed { index, entry ->
+                    key(entry.timestamp) {
+                        AnimItem(5 + minOf(index, 12)) {
+                            HistoryTile(entry = entry, onClick = { onCopyText(entry.text) })
+                        }
+                        Spacer(Modifier.height(12.dp))
                     }
-                    Spacer(Modifier.height(12.dp))
                 }
             }
         }
         Spacer(Modifier.height(32.dp))
+    }
+}
+
+/**
+ * Swipeable stat tabs, replacing the old usage ring. Swipe or tap to
+ * switch; the indicator follows the selected tab.
+ *
+ * Words — words spoken today, with the lifetime total underneath.
+ * Free usage — how much of the 8 free Groq hours is left today
+ * (on-device dictations never count). Speed — words per minute:
+ * words in entries that have a recorded duration, divided by those
+ * entries' total minutes.
+ */
+@Composable
+fun StatTabs(prefs: Prefs) {
+    val scope = rememberCoroutineScope()
+    val pagerState = rememberPagerState(pageCount = { 3 })
+    val labels = listOf("Words", "Free usage", "Speed")
+    val todayStart = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+    val todayEntries = prefs.recent.filter { it.timestamp >= todayStart }
+    val wordsToday = todayEntries.sumOf { countWords(it.text) }
+    val wordsLifetime = prefs.recent.sumOf { countWords(it.text) }
+    val secondsLeft = (28800 - prefs.usageSeconds).coerceAtLeast(0)
+    val usedFraction = (prefs.usageSeconds / 28800f).coerceIn(0f, 1f)
+    val wpm = wordsPerMinute(prefs.recent)
+    val measuredSeconds = prefs.recent.filter { it.seconds > 0 }.sumOf { it.seconds }
+    Column {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+            labels.forEachIndexed { i, label ->
+                val selected = pagerState.currentPage == i
+                val color by animateColorAsState(
+                    targetValue = if (selected) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                    animationSpec = tween(220), label = "statTab$i"
+                )
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .clickable(role = Role.Tab) { scope.launch { pagerState.animateScrollToPage(i) } }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Text(label, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = color)
+                    Box(
+                        modifier = Modifier
+                            .padding(top = 4.dp)
+                            .size(20.dp, 3.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(if (selected) Accent else Color.Transparent)
+                    )
+                }
+            }
+        }
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxWidth()
+        ) { page ->
+            AppCard {
+                when (page) {
+                    0 -> {
+                        Text("$wordsToday", fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                        Text("Words spoken today", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 2.dp))
+                        Text(
+                            "Lifetime: $wordsLifetime words",
+                            fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                        )
+                    }
+                    1 -> {
+                        Text(formatRemaining(secondsLeft), fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                        Text("Free usage left today", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 2.dp))
+                        Text(
+                            "Used ${formatMinutes(prefs.usageSeconds)} of 8 hours (Groq only)",
+                            fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        LinearProgressIndicator(
+                            progress = usedFraction,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    else -> {
+                        Text(
+                            if (wpm != null) "$wpm wpm" else "—",
+                            fontSize = 30.sp, fontWeight = FontWeight.Bold
+                        )
+                        Text("Words per minute", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 2.dp))
+                        Text(
+                            if (wpm != null) "From $wordsLifetime words over ${formatMinutes(measuredSeconds)} of dictation"
+                            else "Dictate to see your speed",
+                            fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1443,6 +1704,7 @@ fun SettingsContent(
     vm: MainViewModel,
     prefs: Prefs,
     context: Context,
+    onDemo: () -> Unit,
     onAbout: () -> Unit,
     onChangeKey: () -> Unit
 ) {
@@ -1501,6 +1763,8 @@ fun SettingsContent(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
                     textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
                 )
+                Spacer(Modifier.height(12.dp))
+                GhostButton(text = "Try the bubble", onClick = onDemo, modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(12.dp))
                 // Bubble size: named presets, not a slider.
                 Text("Size", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
@@ -1586,9 +1850,15 @@ fun SettingsContent(
                     Spacer(Modifier.width(14.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Groq API key", fontWeight = FontWeight.Bold)
-                        Text(KeyStore.maskedKey(context), fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                        Text(
+                            KeyStore.maskedKey(context).ifEmpty { "Not added — on-device only" },
+                            fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                        )
                     }
-                    GhostButton(text = "Change", onClick = onChangeKey, modifier = Modifier.width(110.dp))
+                    GhostButton(
+                        text = if (KeyStore.hasGroqKey(context)) "Change" else "Add",
+                        onClick = onChangeKey, modifier = Modifier.width(110.dp)
+                    )
                 }
             }
         }
@@ -1637,8 +1907,17 @@ fun SettingsContent(
                 )
             }
         }
-        AnimItem(6) { SectionLabel("Transcription engine") }
-        AnimItem(7) {
+        AnimItem(6) {
+            AppCard {
+                Text("How to dictate", fontWeight = FontWeight.Bold)
+                Text(
+                    "Tap the bubble in any text field, speak, then tap again. Your words appear as text. Or hold the bubble for 500 ms to talk, and let go when you are done.",
+                    fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                )
+            }
+        }
+        AnimItem(7) { SectionLabel("Transcription engine") }
+        AnimItem(8) {
             AppCard {
                 Text("Engine", fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
@@ -1655,6 +1934,17 @@ fun SettingsContent(
                 )
                 if (prefs.engine == "local") {
                     Spacer(Modifier.height(12.dp))
+                    // The phone's RAM decides which models can actually
+                    // run — read once per composition; it never changes
+                    // while the user is in Settings.
+                    val totalRam = remember { totalRamBytes(context) }
+                    val lowRam = remember { isLowRamDevice(context) }
+                    val recommended = remember(totalRam, lowRam) { ModelCatalog.recommend(totalRam, lowRam) }
+                    Text(
+                        if (recommended != null) "This device: ${formatRamGb(totalRam)} RAM — recommended: ${recommended.name}." else "This device: ${formatRamGb(totalRam)} RAM.",
+                        fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                    )
+                    Spacer(Modifier.height(12.dp))
                     Text("Models", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                     Spacer(Modifier.height(6.dp))
                     ModelCatalog.all.forEach { model ->
@@ -1663,6 +1953,9 @@ fun SettingsContent(
                             model = model,
                             state = state,
                             selected = prefs.localModelId == model.id,
+                            fits = model.fits(totalRam, lowRam),
+                            fitReason = if (model.fits(totalRam, lowRam)) null else model.ramShortfall(totalRam),
+                            isRecommended = recommended?.id == model.id,
                             onSelect = { vm.setLocalModel(model.id) },
                             onDownload = { vm.downloadModel(model.id) },
                             onPause = { vm.pauseDownload(model.id) },
@@ -1678,7 +1971,7 @@ fun SettingsContent(
                 }
             }
         }
-        AnimItem(8) {
+        AnimItem(9) {
             AppCard {
                 Text("Accessibility", fontWeight = FontWeight.Bold)
                 Text(
@@ -1708,8 +2001,8 @@ fun SettingsContent(
                 )
             }
         }
-        AnimItem(9) { SectionLabel("Appearance") }
-        AnimItem(10) {
+        AnimItem(10) { SectionLabel("Appearance") }
+        AnimItem(11) {
             AppCard {
                 Text("Theme", fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
@@ -1728,7 +2021,7 @@ fun SettingsContent(
                 )
             }
         }
-        AnimItem(11) {
+        AnimItem(12) {
             AppCard(onClick = onAbout) {
                 Text("About OpenFlow", fontWeight = FontWeight.Bold)
                 Text(
@@ -1814,14 +2107,21 @@ private fun ModelRow(
     onDownload: () -> Unit,
     onPause: () -> Unit,
     onCancel: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    // RAM fit, from the caller: a model the phone cannot run is greyed
+    // out with the reason instead of offering a Download button, so the
+    // user can never download one that would only fail at dictation.
+    fits: Boolean = true,
+    fitReason: String? = null,
+    isRecommended: Boolean = false
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(MaterialTheme.colorScheme.background)
-            .clickable(enabled = state is ModelDownloadState.Downloaded) { onSelect() }
+            .clickable(enabled = state is ModelDownloadState.Downloaded && fits) { onSelect() }
+            .alpha(if (fits) 1f else 0.5f)
             .padding(12.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1834,25 +2134,42 @@ private fun ModelRow(
                             fontSize = 13.sp, color = Accent, fontWeight = FontWeight.SemiBold
                         )
                     }
+                    if (isRecommended) {
+                        Text(
+                            "  ·  Best for this phone",
+                            fontSize = 13.sp, color = Accent, fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
                 Text(
                     "${model.sizeMb} MB · ${model.blurb}",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
                 )
+                if (!fits && fitReason != null) {
+                    Text(
+                        fitReason,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
             }
-            when (state) {
-                is ModelDownloadState.NotDownloaded -> ModelAction(text = "Download", onClick = onDownload)
-                is ModelDownloadState.Downloading -> ModelAction(text = "Pause", onClick = onPause)
-                is ModelDownloadState.Paused -> {
-                    ModelAction(text = "Resume", onClick = onDownload)
-                    Spacer(Modifier.width(12.dp))
-                    ModelAction(text = "Cancel", onClick = onCancel)
+            when {
+                !fits -> { /* No action: the model cannot run on this phone. */ }
+                else -> when (state) {
+                    is ModelDownloadState.NotDownloaded -> ModelAction(text = "Download", onClick = onDownload)
+                    is ModelDownloadState.Downloading -> ModelAction(text = "Pause", onClick = onPause)
+                    is ModelDownloadState.Paused -> {
+                        ModelAction(text = "Resume", onClick = onDownload)
+                        Spacer(Modifier.width(12.dp))
+                        ModelAction(text = "Cancel", onClick = onCancel)
+                    }
+                    is ModelDownloadState.Downloaded -> {
+                        if (!selected) ModelAction(text = "Delete", onClick = onDelete)
+                    }
+                    is ModelDownloadState.Failed -> ModelAction(text = "Retry", onClick = onDownload)
                 }
-                is ModelDownloadState.Downloaded -> {
-                    if (!selected) ModelAction(text = "Delete", onClick = onDelete)
-                }
-                is ModelDownloadState.Failed -> ModelAction(text = "Retry", onClick = onDownload)
             }
         }
         when (state) {
@@ -1920,10 +2237,17 @@ private fun engineStatusText(prefs: Prefs, downloadStates: Map<String, ModelDown
 fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult = BubblePreviewResult.NONE, transcribing: Boolean = false) {
     val colors = BUBBLE_COLORS[prefs.bubbleColor]
     val size = prefs.bubbleSize.dp
-    // The listening and thinking pills are longer (2.6x) so the
-    // eleven-bar trace and the thinking dots have room to breathe.
+    // Same morph as the real bubble: idle is the user's selected shape
+    // (circle, or the 1.9x pill); recording expands to the smaller
+    // 2.2x capsule; transcribing and inserted collapse back to the idle
+    // shape; copied stays a 1.9x pill because "Copied" cannot fit in a
+    // circle. The width animates (280 ms, FastOutSlowInEasing) instead
+    // of snapping. Seven-bar trace still fits the 2.2x capsule — see
+    // BubbleService.applyState for the matching native widths.
     val width = when {
-        recording || transcribing -> size * 2.6f
+        recording -> size * 2.2f
+        transcribing -> if (prefs.bubbleShape == "pill") size * 1.9f else size
+        result == BubblePreviewResult.INSERTED -> if (prefs.bubbleShape == "pill") size * 1.9f else size
         result == BubblePreviewResult.COPIED || prefs.bubbleShape == "pill" -> size * 1.9f
         else -> size
     }
@@ -1950,6 +2274,7 @@ fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult 
     Box(
         modifier = Modifier
             .size(width, size)
+            .animateContentSize(animationSpec = tween(280, easing = FastOutSlowInEasing))
             .graphicsLayer {
                 alpha = if (transcribing) glowAlpha else 1f
                 scaleX = if (transcribing) pulse else 1f
@@ -2047,7 +2372,7 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
     val prefs by vm.prefs.collectAsState()
     var fieldText by remember { mutableStateOf("") }
     var fieldHint by remember { mutableStateOf("Type a message") }
-    var bubbleState by remember { mutableStateOf(0) } // 0 idle, 1 recording, 2 transcribing
+    var bubbleState by remember { mutableStateOf(0) } // 0 idle, 1 recording, 2 transcribing, 3 inserted
     val scope = rememberCoroutineScope()
     val recorder = remember { WavRecorder() }
     var recordingFile by remember { mutableStateOf<File?>(null) }
@@ -2118,7 +2443,12 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
                                         when (val result = vm.transcribeFile(file)) {
                                             is TranscribeResult.Ok -> {
                                                 val text = vm.applyPunctuation(result.text)
-                                                // Type the text out, like the HTML demo.
+                                                // Inserted: the bubble shows the check
+                                                // while the text types out, like the real
+                                                // bubble's INSERTED state. Copied does
+                                                // not apply here — the demo inserts into
+                                                // the fake chat and never copies.
+                                                bubbleState = 3
                                                 fieldHint = ""
                                                 fieldText = ""
                                                 for (i in text.indices) {
@@ -2126,6 +2456,7 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
                                                     delay(26)
                                                 }
                                                 vm.recordDictation(result.text, seconds.toInt(), vm.lastTranscribeUsedGroq)
+                                                delay(900)
                                                 bubbleState = 0
                                                 fieldHint = "Type a message"
                                             }
@@ -2159,6 +2490,7 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
                         BubblePreview(
                             prefs = prefs,
                             recording = bubbleState == 1,
+                            result = if (bubbleState == 3) BubblePreviewResult.INSERTED else BubblePreviewResult.NONE,
                             transcribing = bubbleState == 2
                         )
                     }
@@ -2207,7 +2539,7 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
                     contentScale = ContentScale.Crop
                 )
                 Text("About OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp))
-                Text("Version 2.3.1", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                Text("Version 2.4.0", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
             }
         }
         AnimItem(2) {
@@ -2215,7 +2547,7 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
                 Text("Free, always. Audio is processed by Groq or on your device. We never see or store it.", fontSize = 16.sp)
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "OpenFlow is a free, open-source voice dictation app. Speak in any app with the floating bubble, and your words appear as text — powered by your own free Groq API key. No account, no ads, no subscription.",
+                    "OpenFlow is a free, open-source voice dictation app. Speak in any app with the floating bubble, and your words appear as text — powered by your own free Groq API key, or fully on-device with no key at all. No account, no ads, no subscription.",
                     fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
                 )
             }

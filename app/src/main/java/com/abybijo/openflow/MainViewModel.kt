@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
@@ -33,13 +33,22 @@ val BUBBLE_OPACITY_PRESETS = listOf(60, 80, 100)
 val BUBBLE_OPACITY_NAMES = listOf("Subtle", "Balanced", "Solid")
 
 class MainViewModel(private val context: Context) : ViewModel() {
+    /**
+     * One shared upstream for prefs and prefsReady. Two separate
+     * DataStore collections could deliver their first values a frame
+     * apart — prefsReady true while prefs still held the default
+     * (onboarding not done) — and the app would flash the wrong
+     * screen. Here the ready flag flips inside the same emission that
+     * delivers the loaded prefs, so the UI can never observe one
+     * without the other.
+     */
+    private val _prefsReady = MutableStateFlow(false)
     val prefs: StateFlow<Prefs> = Store.prefsFlow(context)
+        .onEach { _prefsReady.value = true }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), Prefs())
 
     /** True once the stored preferences have actually loaded (first DataStore emission). */
-    val prefsReady: StateFlow<Boolean> = Store.prefsFlow(context)
-        .map { true }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+    val prefsReady: StateFlow<Boolean> = _prefsReady
 
     val hasKey = MutableStateFlow(KeyStore.hasGroqKey(context))
 
@@ -165,6 +174,8 @@ class MainViewModel(private val context: Context) : ViewModel() {
     fun completeOnboarding() = viewModelScope.launch { Store.setOnboardingDone(context) }
 
     fun setOnboardingStep(step: Int) = viewModelScope.launch { Store.setOnboardingStep(context, step) }
+
+    fun setOnboardingEngine(engine: String) = viewModelScope.launch { Store.setOnboardingEngine(context, engine) }
 
     fun saveKey(key: String) {
         KeyStore.saveGroqKey(context, key)

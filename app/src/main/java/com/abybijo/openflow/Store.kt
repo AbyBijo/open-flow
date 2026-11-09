@@ -19,7 +19,8 @@ import java.util.Locale
 
 val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "openflow_prefs")
 
-data class RecentEntry(val timestamp: Long, val text: String)
+/** One finished dictation. [seconds] is the recorded audio length (0 for entries saved before 2.4.0). */
+data class RecentEntry(val timestamp: Long, val text: String, val seconds: Int = 0)
 
 data class Prefs(
     val onboardingDone: Boolean = false,
@@ -37,6 +38,8 @@ data class Prefs(
     val reviewBeforeInsert: Boolean = false,
     val engine: String = "groq", // groq | local
     val localModelId: String = ModelCatalog.DEFAULT_MODEL_ID,
+    /** Onboarding engine choice ("groq" | "local", "" = not chosen yet). */
+    val onboardingEngine: String = "",
     val haptic: Boolean = true,
     val usageDate: String = "",
     val usageSeconds: Int = 0,
@@ -59,6 +62,7 @@ object Store {
     private val REVIEW_BEFORE_INSERT = booleanPreferencesKey("review_before_insert")
     private val ENGINE = stringPreferencesKey("engine")
     private val LOCAL_MODEL_ID = stringPreferencesKey("local_model_id")
+    private val ONBOARDING_ENGINE = stringPreferencesKey("onboarding_engine")
     private val HAPTIC = booleanPreferencesKey("haptic")
     private val USAGE_DATE = stringPreferencesKey("usage_date")
     private val USAGE_SECONDS = intPreferencesKey("usage_seconds")
@@ -73,7 +77,7 @@ object Store {
         val usageSeconds = if (storedDate == today) (p[USAGE_SECONDS] ?: 0) else 0
         Prefs(
             onboardingDone = p[ONBOARDING_DONE] ?: false,
-            onboardingStep = (p[ONBOARDING_STEP] ?: 0).coerceIn(0, 4),
+            onboardingStep = (p[ONBOARDING_STEP] ?: 0).coerceIn(0, 5),
             theme = p[THEME] ?: "system",
             bubbleEnabled = p[BUBBLE_ENABLED] ?: true,
             bubbleSize = (p[BUBBLE_SIZE] ?: 58).coerceIn(44, 84),
@@ -87,6 +91,7 @@ object Store {
             reviewBeforeInsert = p[REVIEW_BEFORE_INSERT] ?: false,
             engine = (p[ENGINE] ?: "groq").takeIf { it == "local" } ?: "groq",
             localModelId = p[LOCAL_MODEL_ID] ?: ModelCatalog.DEFAULT_MODEL_ID,
+            onboardingEngine = (p[ONBOARDING_ENGINE] ?: "").takeIf { it == "local" || it == "groq" } ?: "",
             haptic = p[HAPTIC] ?: true,
             usageDate = storedDate,
             usageSeconds = usageSeconds,
@@ -99,7 +104,7 @@ object Store {
             val arr = JSONArray(json)
             (0 until arr.length()).mapNotNull { i ->
                 val o = arr.getJSONObject(i)
-                RecentEntry(o.optLong("t"), o.optString("text"))
+                RecentEntry(o.optLong("t"), o.optString("text"), o.optInt("s", 0))
             }.sortedByDescending { it.timestamp }
         } catch (_: Exception) {
             emptyList()
@@ -112,6 +117,7 @@ object Store {
             val o = JSONObject()
             o.put("t", e.timestamp)
             o.put("text", e.text)
+            o.put("s", e.seconds)
             arr.put(o)
         }
         return arr.toString()
@@ -123,7 +129,12 @@ object Store {
 
     /** Persist the current onboarding step so a killed process resumes there. */
     suspend fun setOnboardingStep(context: Context, step: Int) {
-        context.dataStore.edit { it[ONBOARDING_STEP] = step.coerceIn(0, 4) }
+        context.dataStore.edit { it[ONBOARDING_STEP] = step.coerceIn(0, 5) }
+    }
+
+    /** Persist the onboarding engine fork choice ("groq" | "local"). */
+    suspend fun setOnboardingEngine(context: Context, engine: String) {
+        context.dataStore.edit { it[ONBOARDING_ENGINE] = if (engine == "local") "local" else "groq" }
     }
 
     suspend fun setTheme(context: Context, theme: String) {
@@ -194,7 +205,7 @@ object Store {
         val storedDate = current[USAGE_DATE] ?: ""
         val baseSeconds = if (storedDate == today) (current[USAGE_SECONDS] ?: 0) else 0
         val recent = parseRecent(current[RECENT_JSON] ?: "[]").toMutableList()
-        recent.add(0, RecentEntry(System.currentTimeMillis(), text))
+        recent.add(0, RecentEntry(System.currentTimeMillis(), text, audioSeconds.coerceAtLeast(0)))
         context.dataStore.edit {
             if (countUsage) {
                 it[USAGE_DATE] = today

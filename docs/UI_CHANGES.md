@@ -1,5 +1,21 @@
 # UI / UX changes (on top of v2.3.0)
 
+## v2.4.0
+
+- Home header: "OpenFlow" is centred at the top with the app icon immediately to its left. The greeting is gone.
+- The usage ring is replaced by swipeable stat tabs (Words today + lifetime total, Free usage left of the 8 Groq hours, Words per minute). Swipe or tap to switch.
+- "Try the bubble" and the "How to dictate" card left Home. Home keeps only the header, bubble toggle, stat tabs and history. "How to dictate" lives in Settings; the demo is reachable from Settings instead.
+- History is grouped by day at display time — Today, Yesterday, then dates. Tap-to-copy and per-entry times are unchanged.
+- Onboarding is now an explicit fork: "Groq API key" or "On-device model". The on-device path has no key step at all. It shows the phone's RAM, recommends the largest model that fits safely, and greys out models that do not fit with the reason.
+- The floating bubble morphs: tap once to expand into the smaller 2.2x recording capsule (~280 ms), tap again to collapse to the idle shape with the thinking dots inside. Hold-to-talk (500 ms) still works alongside. Dragging shows a "Turn off bubble" target at the bottom centre; dropping on it turns the bubble off without opening the app.
+- Thinking dots are no longer clipped: the thinking row is taller than the dots and clipping is off on the row and the root.
+- No route renders until the stored preferences have loaded, so returning users never see onboarding flash after the splash.
+- Dictation has no 60-second cap any more. Long recordings are split into 30 s windows on-device (600 s for Groq) and the transcripts merged in order.
+- Medium and Large models are downloadable options (Medium 1537 MB, Large Turbo 1623 MB, Large 3094 MB, plus .en and Q5_1 variants), on demand only, never bundled. The storage check still applies.
+- The Settings bubble preview and the demo screen follow the same tap flow as the real bubble: idle -> recording capsule -> transcribing (collapsed shape + dots) -> inserted -> copied.
+
+## v2.3.1
+
 UI layer only. No change to dictation, Groq, on-device engine, key storage, the bubble service or permissions.
 
 ## Layout

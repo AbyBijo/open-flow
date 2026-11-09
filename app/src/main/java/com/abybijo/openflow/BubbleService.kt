@@ -29,6 +29,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
+import androidx.core.view.animation.PathInterpolatorCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -84,6 +85,14 @@ class BubbleService : Service() {
     private var thinkingRow: LinearLayout? = null
     private var thinkingDots: List<View> = emptyList()
     private var thinkingAnimators: List<Animator> = emptyList()
+    /** Drag-to-dismiss target (bottom centre, shown only while dragging). */
+    private var dismissLayout: LinearLayout? = null
+    private var dismissCircle: FrameLayout? = null
+    private var dismissCircleBg: GradientDrawable? = null
+    private var dismissParams: WindowManager.LayoutParams? = null
+    private var overDismiss = false
+    /** Width morph between the compact bubble and the recording capsule. */
+    private var widthAnimator: ValueAnimator? = null
     /** Drawable alpha from the user's opacity preset; the breathing glow animates around it. */
     private var bubbleBaseAlpha: Int = 255
     /** Scrolling history of smoothed mic levels, newest on the right. */
@@ -159,12 +168,21 @@ class BubbleService : Service() {
         stopWaveAnimation()
         snapAnimator?.cancel()
         snapAnimator = null
+        widthAnimator?.cancel()
+        widthAnimator = null
         OpenFlowAccessibilityService.clearPending()
         try { recorder?.let { } } catch (_: Exception) { }
         try {
             bubbleView?.let { windowManager?.removeView(it) }
         } catch (_: Exception) { }
         bubbleView = null
+        try {
+            dismissLayout?.let { windowManager?.removeView(it) }
+        } catch (_: Exception) { }
+        dismissLayout = null
+        dismissCircle = null
+        dismissCircleBg = null
+        dismissParams = null
         super.onDestroy()
     }
 
@@ -284,11 +302,26 @@ class BubbleService : Service() {
         // and breathe while the words are being worked out — deliberately
         // not bars, so the two states can never be confused: the bars
         // mean "I can hear you", the dots mean "I'm thinking".
+        //
+        // The dots bob 5 dp up from centre. Two things used to cut them
+        // off: a ViewGroup clips its children to its own bounds by
+        // default, and the row was exactly as tall as the dots, so the
+        // top of the bob was drawn outside the row and clipped — the
+        // "invisible barrier". So the row is taller than the dots (18 dp
+        // for an 8 dp dot) AND neither the row nor the root clips its
+        // children, so the bob is fully visible in every bubble size.
+        // On the smallest bubble the dots shrink a little (7 dp) so all
+        // three still fit inside the round shape with breathing room.
+        root.clipChildren = false
         thinkingRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             visibility = View.GONE
+            clipChildren = false
         }
+        val smallBubble = sizePx < dp(56)
+        val dotSize = if (smallBubble) dp(7) else dp(8)
+        val dotMargin = if (smallBubble) dp(2) else dp(3)
         val dots = mutableListOf<View>()
         repeat(3) {
             val dot = View(this).apply {
@@ -298,15 +331,15 @@ class BubbleService : Service() {
                 }
                 alpha = 0.6f
             }
-            val dotParams = LinearLayout.LayoutParams(dp(8), dp(8))
-            dotParams.setMargins(dp(3), 0, dp(3), 0)
+            val dotParams = LinearLayout.LayoutParams(dotSize, dotSize)
+            dotParams.setMargins(dotMargin, 0, dotMargin, 0)
             thinkingRow?.addView(dot, dotParams)
             dots.add(dot)
         }
         thinkingDots = dots
         root.addView(thinkingRow, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER
+            dp(18), Gravity.CENTER
         ))
 
         val metrics = resources.displayMetrics
@@ -335,7 +368,157 @@ class BubbleService : Service() {
             Toast.makeText(this, "Could not show the bubble: ${e.message}", Toast.LENGTH_LONG).show()
             stopSelf()
         }
+        addDismissTarget()
         applyState()
+    }
+
+    /**
+     * Drag-to-dismiss target: a red circle with an X and a "Turn off
+     * bubble" label, pinned to the bottom centre of the screen. It is
+     * a separate overlay window that never takes touches
+     * (FLAG_NOT_TOUCHABLE), so it can never steal a tap from the
+     * bubble itself. Hidden until a drag starts.
+     */
+    private fun addDismissTarget() {
+        val wm = windowManager ?: return
+        if (dismissLayout != null) return
+        val circleBg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.parseColor("#EF4444"))
+            alpha = 200
+        }
+        dismissCircleBg = circleBg
+        val circle = FrameLayout(this).apply {
+            background = circleBg
+        }
+        val xIcon = ImageView(this).apply {
+            setImageResource(R.drawable.ic_close)
+            setColorFilter(Color.WHITE)
+        }
+        val iconSize = dp(28)
+        circle.addView(xIcon, FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER))
+        dismissCircle = circle
+        val label = TextView(this).apply {
+            text = "Turn off bubble"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(12).toFloat()
+                setColor(Color.parseColor("#99000000"))
+            }
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+        }
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            visibility = View.GONE
+        }
+        val circleSize = dp(64)
+        layout.addView(circle, LinearLayout.LayoutParams(circleSize, circleSize))
+        val labelParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+        labelParams.topMargin = dp(8)
+        layout.addView(label, labelParams)
+        dismissLayout = layout
+        dismissParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else
+                WindowManager.LayoutParams.TYPE_PHONE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            y = dp(64)
+        }
+        try {
+            wm.addView(layout, dismissParams)
+        } catch (_: Exception) {
+            dismissLayout = null
+            dismissCircle = null
+            dismissCircleBg = null
+            dismissParams = null
+        }
+    }
+
+    /** Screen-space centre of the dismiss circle. */
+    private fun dismissCenter(): Pair<Float, Float> {
+        val circle = dismissCircle ?: return 0f to 0f
+        val loc = IntArray(2)
+        circle.getLocationOnScreen(loc)
+        return (loc[0] + circle.width / 2f) to (loc[1] + circle.height / 2f)
+    }
+
+    /** True when the bubble's centre is over the dismiss circle (generous radius). */
+    private fun isOverDismiss(): Boolean {
+        val p = params ?: return false
+        val bubbleCx = p.x + p.width / 2f
+        val bubbleCy = p.y + p.height / 2f
+        val (cx, cy) = dismissCenter()
+        if (cx == 0f && cy == 0f) return false
+        val dx = bubbleCx - cx
+        val dy = bubbleCy - cy
+        return kotlin.math.hypot(dx.toDouble(), dy.toDouble()) < dp(64) * 1.1
+    }
+
+    /** Show the target; highlight it while the bubble is over it. */
+    private fun showDismiss(over: Boolean) {
+        val layout = dismissLayout ?: return
+        layout.visibility = View.VISIBLE
+        dismissCircleBg?.alpha = if (over) 255 else 200
+        val scale = if (over) 1.12f else 1f
+        dismissCircle?.scaleX = scale
+        dismissCircle?.scaleY = scale
+    }
+
+    private fun hideDismiss() {
+        dismissLayout?.visibility = View.GONE
+        dismissCircle?.scaleX = 1f
+        dismissCircle?.scaleY = 1f
+        overDismiss = false
+    }
+
+    /**
+     * The user dropped the bubble on the dismiss target: turn the
+     * bubble off for good (persisted, so it does not come back on the
+     * next boot) and stop the service — without opening the app. A
+     * recording in progress is stopped silently and its audio
+     * discarded; nothing is transcribed or inserted. The position is
+     * deliberately not saved: the last thing the user did was drag
+     * the bubble onto dismiss, which is nowhere they would want it
+     * to reappear.
+     */
+    private fun dismissBubble() {
+        hideDismiss()
+        if (state == BubbleState.RECORDING) {
+            cancelRecording()
+        }
+        haptic()
+        scope.launch { Store.setBubbleEnabled(this@BubbleService, false) }
+        stopSelf()
+    }
+
+    /** Stop a recording without transcribing or inserting anything. */
+    private fun cancelRecording() {
+        val rec = recorder
+        val file = recordingFile
+        recorder = null
+        recordingFile = null
+        recordingHostPackage = null
+        stopWaveAnimation()
+        if (rec != null && file != null) {
+            scope.launch(Dispatchers.IO) {
+                try { rec.stop(file) } catch (_: Exception) { }
+                try { file.delete() } catch (_: Exception) { }
+            }
+        }
+        setState(BubbleState.IDLE)
     }
 
     /**
@@ -378,16 +561,45 @@ class BubbleService : Service() {
                     return true
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    // Once hold-to-talk is live the bubble is a mic button,
+                    // not a draggable thing: dragging it would move it
+                    // mid-sentence and could drop it on the dismiss target
+                    // while recording. Tap-initiated recording (and idle)
+                    // can still be dragged.
+                    if (holdingToTalk) return true
                     val dx = (event.rawX - downX).toInt()
                     val dy = (event.rawY - downY).toInt()
                     if (!dragged && kotlin.math.abs(dx) + kotlin.math.abs(dy) > dp(8)) {
                         // Past the drag slop: this is a drag, not a hold.
                         v.removeCallbacks(holdRunnable)
                         dragged = true
+                        // The dismiss target appears only for a drag from
+                        // idle or from tap-initiated recording — never
+                        // while transcribing, when the words are in flight.
+                        if (state == BubbleState.IDLE || state == BubbleState.RECORDING) {
+                            showDismiss(false)
+                        }
                     }
                     if (dragged) {
                         params?.x = startX + dx
                         params?.y = startY + dy
+                        if (state == BubbleState.IDLE || state == BubbleState.RECORDING) {
+                            val wasOver = overDismiss
+                            overDismiss = isOverDismiss()
+                            // Tick on the way in, so "let go now and it
+                            // is gone" is felt rather than watched.
+                            if (overDismiss && !wasOver) haptic()
+                            showDismiss(overDismiss)
+                            if (overDismiss) {
+                                // Magnetise into the target for a clear
+                                // "drop to remove" feel.
+                                val (cx, cy) = dismissCenter()
+                                val w = params?.width ?: 0
+                                val h = params?.height ?: 0
+                                params?.x = (cx - w / 2f).toInt()
+                                params?.y = (cy - h / 2f).toInt()
+                            }
+                        }
                         try { windowManager?.updateViewLayout(bubbleView, params) } catch (_: Exception) { }
                     }
                     return true
@@ -396,13 +608,16 @@ class BubbleService : Service() {
                     v.removeCallbacks(holdRunnable)
                     if (holdingToTalk) {
                         holdingToTalk = false
-                        if (dragged) {
-                            lastX = params?.x
-                            lastY = params?.y
-                            if (prefs.snapToEdge) snapToEdge()
-                        }
                         stopAndTranscribe()
+                    } else if (dragged && overDismiss &&
+                        (state == BubbleState.IDLE || state == BubbleState.RECORDING)
+                    ) {
+                        // Dropped on the target: turn the bubble off.
+                        // Merely passing over it and releasing elsewhere
+                        // does nothing — only a drop inside dismisses.
+                        dismissBubble()
                     } else if (dragged) {
+                        hideDismiss()
                         lastX = params?.x
                         lastY = params?.y
                         if (prefs.snapToEdge) snapToEdge()
@@ -413,6 +628,7 @@ class BubbleService : Service() {
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     v.removeCallbacks(holdRunnable)
+                    hideDismiss()
                     if (holdingToTalk) {
                         holdingToTalk = false
                         stopAndTranscribe()
@@ -432,6 +648,9 @@ class BubbleService : Service() {
         stopWaveAnimation()
         snapAnimator?.cancel()
         snapAnimator = null
+        widthAnimator?.cancel()
+        widthAnimator = null
+        hideDismiss()
         try {
             bubbleView?.let { windowManager?.removeView(it) }
         } catch (_: Exception) { }
@@ -551,16 +770,42 @@ class BubbleService : Service() {
             else -> intArrayOf(colors.first.toInt(), colors.second.toInt())
         }
         bg.colors = stateColors
-        // The recording and transcribing pills are longer (2.6x) so the
-        // eleven-bar waveform and the thinking dots have room to breathe.
-        val width = when (state) {
-            BubbleState.RECORDING, BubbleState.TRANSCRIBING -> (sizePx * 2.6).toInt()
+        // Width is the user's idle shape, except while recording: one
+        // tap expands the compact bubble into a 2.2x capsule for the
+        // seven-bar waveform, and the second tap collapses it back to
+        // the idle shape while the thinking dots run inside it. The
+        // 2.2x capsule is smaller than the old 2.6x one and still fits
+        // the bars (7 x 8 dp) plus the live dot with room to spare,
+        // even at the Small bubble size (48 dp -> 106 dp capsule).
+        // Copied keeps a 1.9x pill: the word "Copied" cannot fit inside
+        // a round bubble, whatever shape the user picked.
+        val idleWidth = if (prefs.bubbleShape == "pill") (sizePx * 1.9).toInt() else sizePx
+        val targetWidth = when (state) {
+            BubbleState.RECORDING -> (sizePx * 2.2).toInt()
             BubbleState.COPIED -> (sizePx * 1.9).toInt()
-            BubbleState.INSERTED -> sizePx
-            BubbleState.IDLE -> if (prefs.bubbleShape == "pill") (sizePx * 1.9).toInt() else sizePx
+            else -> idleWidth
         }
-        params?.width = width
-        try { windowManager?.updateViewLayout(bubbleView, params) } catch (_: Exception) { }
+        // Animated morph (~280 ms, FastOutSlowInEasing), not a snap:
+        // the bubble grows into the capsule and shrinks back. A new
+        // state cancels the in-flight morph and starts from wherever
+        // the width currently is.
+        val currentWidth = params?.width ?: targetWidth
+        widthAnimator?.cancel()
+        widthAnimator = null
+        if (currentWidth == targetWidth) {
+            params?.width = targetWidth
+            try { windowManager?.updateViewLayout(bubbleView, params) } catch (_: Exception) { }
+        } else {
+            widthAnimator = ValueAnimator.ofInt(currentWidth, targetWidth).apply {
+                duration = 280
+                interpolator = PathInterpolatorCompat.create(0.4f, 0f, 0.2f, 1f)
+                addUpdateListener { anim ->
+                    params?.width = anim.animatedValue as Int
+                    try { windowManager?.updateViewLayout(bubbleView, params) } catch (_: Exception) { }
+                }
+                start()
+            }
+        }
         // Mic: idle, or recording with the waveform switched off.
         micIcon?.visibility =
             if (state == BubbleState.IDLE || (state == BubbleState.RECORDING && !prefs.showWaveform)) View.VISIBLE

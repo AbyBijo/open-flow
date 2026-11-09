@@ -12,12 +12,13 @@ import kotlin.math.sqrt
 
 /**
  * Records 16 kHz mono PCM to a WAV file. VOICE_RECOGNITION source first,
- * MIC as fallback. A single utterance is capped at 60 seconds.
+ * MIC as fallback. Recording runs until the user stops it — there is no
+ * time cap. Long recordings are split into chunks at transcription time
+ * (see SttEngine), so nothing is ever cut off.
  */
 class WavRecorder {
     companion object {
         const val SAMPLE_RATE = 16000
-        const val MAX_SECONDS = 60
         /** Real speech peaks at roughly 1300–2900 on VOICE_RECOGNITION; 6000 is a safe full scale. */
         const val FULL_SCALE_PEAK = 6000
         /** Silent bars never fall below this level. */
@@ -85,7 +86,7 @@ class WavRecorder {
             val out = FileOutputStream(outputFile, true)
             try {
                 source.startRecording()
-                while (recording && pcmBytes < SAMPLE_RATE * 2 * MAX_SECONDS) {
+                while (recording) {
                     val read = source.read(buffer, 0, buffer.size)
                     if (read > 0) {
                         var peak = 0
