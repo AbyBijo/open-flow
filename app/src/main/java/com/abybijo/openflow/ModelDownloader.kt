@@ -34,6 +34,9 @@ data class DownloadProgress(
  * service does). [isCancelled] is polled between buffer reads.
  */
 object ModelDownloader {
+    /** Download rounds (primary + mirror) before a failure is final. */
+    const val MAX_ATTEMPTS = 3
+
     fun modelsDir(context: Context): File = File(context.filesDir, "models").apply { mkdirs() }
 
     fun modelFile(context: Context, model: WhisperModel): File =
@@ -75,48 +78,97 @@ object ModelDownloader {
         }
     }
 
+    /**
+     * Download with automatic retry: an HTTP error or a dropped
+     * connection must not fail the download outright. Transient
+     * failures are retried (up to [MAX_ATTEMPTS] rounds over both
+     * mirrors, with backoff), resuming from the partial .tmp file
+     * every time. The partial is kept for resume on transient
+     * failure; only a genuinely corrupt file (SHA or size mismatch
+     * after a full download) is deleted so the next attempt starts
+     * clean. [onRetry] reports each retry so the UI can say
+     * "retrying" honestly instead of flashing a failure.
+     */
     fun download(
         context: Context,
         model: WhisperModel,
         onProgress: (DownloadProgress) -> Unit,
-        isCancelled: () -> Boolean
+        isCancelled: () -> Boolean,
+        onRetry: ((attempt: Int, maxAttempts: Int, message: String) -> Unit)? = null
     ) {
         val target = modelFile(context, model)
         val tmp = File(modelsDir(context), target.name + ".tmp")
         var lastError: Exception? = null
         // Primary: Hugging Face. Fallback: ggml mirror, same file.
         val urls = listOf(model.url, model.mirrorUrl)
-        for (urlString in urls) {
-            try {
-                downloadFromUrl(urlString, tmp, onProgress, isCancelled)
-                if (isCancelled()) throw InterruptedException("Download paused")
-                if (model.sha256 != null) {
-                    val actual = sha256(tmp)
-                    if (!actual.equals(model.sha256, ignoreCase = true)) {
-                        tmp.delete()
-                        throw IllegalStateException("Downloaded model failed verification (SHA-256 mismatch)")
+        var attempt = 0
+        while (attempt < MAX_ATTEMPTS) {
+            attempt++
+            for (urlString in urls) {
+                try {
+                    downloadFromUrl(urlString, tmp, onProgress, isCancelled)
+                    if (isCancelled()) throw InterruptedException("Download paused")
+                    if (model.sha256 != null) {
+                        val actual = sha256(tmp)
+                        if (!actual.equals(model.sha256, ignoreCase = true)) {
+                            // Corrupt, not transient: delete the partial
+                            // so the retry starts clean, never resumes it.
+                            tmp.delete()
+                            throw IllegalStateException("Downloaded model failed verification (SHA-256 mismatch)")
+                        }
+                    } else {
+                        // No pinned SHA: the size must still land — a
+                        // short file is a failed download, not a model.
+                        val minBytes = model.sizeMb * 1024L * 1024L * 9 / 10
+                        if (tmp.length() < minBytes) {
+                            tmp.delete()
+                            throw IllegalStateException("Downloaded model is incomplete")
+                        }
                     }
-                } else if (tmp.length() <= 0L) {
-                    tmp.delete()
-                    throw IllegalStateException("Downloaded model is empty")
+                    if (target.exists()) target.delete()
+                    if (!tmp.renameTo(target)) {
+                        tmp.copyTo(target, overwrite = true)
+                        tmp.delete()
+                    }
+                    return
+                } catch (e: InterruptedException) {
+                    // Keep .tmp for resume; the caller decides pause vs cancel.
+                    throw e
+                } catch (e: Exception) {
+                    lastError = e
+                    // Transient failure: keep .tmp for resume. A corrupt
+                    // partial was already deleted above by the check
+                    // that caught it, so the next attempt starts clean.
+                    if (!isTransient(e)) throw e
                 }
-                if (target.exists()) target.delete()
-                if (!tmp.renameTo(target)) {
-                    tmp.copyTo(target, overwrite = true)
-                    tmp.delete()
-                }
-                return
-            } catch (e: InterruptedException) {
-                // Keep .tmp for resume; the caller decides pause vs cancel.
-                throw e
-            } catch (e: Exception) {
-                lastError = e
-                // Do not delete .tmp here: a transient failure can also be
-                // resumed, and a corrupt partial is caught by the SHA/size
-                // check on the next attempt.
+            }
+            if (attempt < MAX_ATTEMPTS) {
+                onRetry?.invoke(attempt, MAX_ATTEMPTS, lastError?.message ?: "Download failed")
+                backoff(attempt, isCancelled)
             }
         }
         throw lastError ?: IllegalStateException("Download failed")
+    }
+
+    /** True for failures worth retrying: network trouble, server-side HTTP errors, and a short file (truncated stream — the partial is deleted and the retry starts clean). A SHA mismatch is not transient: the source itself is wrong, and retrying would just re-download the same bad bytes. */
+    private fun isTransient(e: Exception): Boolean {
+        if (e is java.io.IOException) return true
+        val message = e.message ?: return false
+        return message.contains("HTTP 5") || message.contains("HTTP 429") ||
+            message.contains("timed out", ignoreCase = true) ||
+            message.contains("Unable to resolve", ignoreCase = true) ||
+            message.contains("incomplete", ignoreCase = true)
+    }
+
+    /** Backoff between attempts (1 s, then 2 s), interruptible so Pause still works mid-wait. */
+    private fun backoff(attempt: Int, isCancelled: () -> Boolean) {
+        val waitMs = (1000L shl (attempt - 1)).coerceAtMost(4000L)
+        var waited = 0L
+        while (waited < waitMs) {
+            if (isCancelled()) throw InterruptedException("Download paused")
+            Thread.sleep(100)
+            waited += 100
+        }
     }
 
     private fun downloadFromUrl(

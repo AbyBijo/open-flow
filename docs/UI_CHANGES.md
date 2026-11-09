@@ -1,5 +1,16 @@
 # UI / UX changes (on top of v2.3.0)
 
+## v2.4.1
+
+- Speed is the headline: the native Whisper engine is now compiled with full optimisation (-O3, armv8.2-a+fp16, link-time optimisation) in every build type, including Debug — the shipped APK never runs it unoptimised again. Thread count follows the phone's fast cores (up to 6, never below 4) instead of a flat cap of 4, and English dictation decodes in one segment.
+- A slow press on the bubble to stop a recording no longer does nothing: any clean press-release counts as a tap, however long the press lasted.
+- The loading state is one complete big round breathing on and off — no more three dots inside a visible box. Same in the Settings preview and the demo.
+- The waveform is a little shorter and eases smoothly instead of jumping; the recording capsule is smaller still (2.0x).
+- The stat tabs are normalised: equal thirds, one indicator pill that slides with the finger mid-swipe, spring animation on tap.
+- Model downloads retry automatically on HTTP errors and dropped connections (3 rounds over both mirrors, with backoff), resuming from the partial file; the list shows "Retrying…" honestly instead of a failure. Only a genuinely corrupt file restarts from scratch.
+- Models that do not fit the phone are hidden from the list, with a "See more" row that reveals them with the reason each does not fit. "See less" hides them again.
+- Lifecycle: killing the bubble service mid-recording now stops the microphone, and leaving the demo mid-recording stops it too.
+
 ## v2.4.0
 
 - Home header: "OpenFlow" is centred at the top with the app icon immediately to its left. The greeting is gone.

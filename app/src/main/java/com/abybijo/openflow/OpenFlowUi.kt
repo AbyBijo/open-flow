@@ -17,10 +17,12 @@ import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -36,6 +38,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -62,6 +65,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -78,6 +82,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
@@ -111,6 +116,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -120,6 +126,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 // ---------- Theme (from the HTML spec) ----------
 
@@ -868,6 +875,11 @@ fun ModelDownloadStep(vm: MainViewModel, onStep: (Int) -> Unit) {
     val lowRam = remember { isLowRamDevice(context) }
     val recommended = remember(totalRam, lowRam) { ModelCatalog.recommend(totalRam, lowRam) }
     var chosenId by rememberSaveable { mutableStateOf(recommended?.id ?: ModelCatalog.DEFAULT_MODEL_ID) }
+    // Models that do not fit are hidden by default; "See more" at the
+    // end of the list reveals them with the reason each does not fit.
+    // The chosen model is always shown, even if it does not fit, so a
+    // previous choice never vanishes from the list.
+    var showAllModels by rememberSaveable { mutableStateOf(false) }
     val chosen = ModelCatalog.byId(chosenId)
     val chosenState = downloadStates[chosen.id] ?: ModelDownloadState.NotDownloaded
     val ready = chosenState is ModelDownloadState.Downloaded
@@ -899,7 +911,10 @@ fun ModelDownloadStep(vm: MainViewModel, onStep: (Int) -> Unit) {
             }
             AnimItem(4) {
                 Text("Models", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
-                ModelCatalog.all.forEach { model ->
+                val hiddenModels = ModelCatalog.all.filter { !it.fits(totalRam, lowRam) }
+                val visibleModels = if (showAllModels) ModelCatalog.all
+                else ModelCatalog.all.filter { it.fits(totalRam, lowRam) || it.id == chosenId }
+                visibleModels.forEach { model ->
                     val state = downloadStates[model.id] ?: ModelDownloadState.NotDownloaded
                     ModelRow(
                         model = model,
@@ -922,8 +937,19 @@ fun ModelDownloadStep(vm: MainViewModel, onStep: (Int) -> Unit) {
                     )
                     Spacer(Modifier.height(10.dp))
                 }
+                if (hiddenModels.isNotEmpty()) {
+                    Text(
+                        if (showAllModels) "See less" else "See more (${hiddenModels.size} hidden)",
+                        color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .clickable(role = Role.Button) { showAllModels = !showAllModels }
+                            .padding(vertical = 12.dp)
+                    )
+                }
                 Text(
-                    "Models that do not fit your phone's memory are greyed out — downloading one would finish and then fail the first time you dictate.",
+                    "Models that do not fit your phone's memory are hidden — tap See more to view them. Downloading one would finish and then fail the first time you dictate.",
                     fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
                 )
             }
@@ -1628,28 +1654,58 @@ fun StatTabs(prefs: Prefs) {
     val usedFraction = (prefs.usageSeconds / 28800f).coerceIn(0f, 1f)
     val wpm = wordsPerMinute(prefs.recent)
     val measuredSeconds = prefs.recent.filter { it.seconds > 0 }.sumOf { it.seconds }
+    // Normalised tabs: every tab is exactly one third of the width
+    // (weight(1f), never intrinsic content width), so "Free usage"
+    // cannot skew the layout wider than "Words" or "Speed". One
+    // sliding indicator pill sits under the labels and its position
+    // is driven directly by the pager's scroll offset — it follows
+    // the finger mid-swipe instead of jumping when a page settles.
     Column {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            labels.forEachIndexed { i, label ->
-                val selected = pagerState.currentPage == i
-                val color by animateColorAsState(
-                    targetValue = if (selected) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                    animationSpec = tween(220), label = "statTab$i"
-                )
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier
-                        .heightIn(min = 48.dp)
-                        .clickable(role = Role.Tab) { scope.launch { pagerState.animateScrollToPage(i) } }
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                ) {
-                    Text(label, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = color)
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val tabWidthPx = constraints.maxWidth / 3f
+            // Continuous page position: the settled page plus the
+            // swipe fraction, so the indicator glides with the swipe.
+            val pageOffset = pagerState.currentPage + pagerState.currentPageOffsetFraction
+            Column {
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    labels.forEachIndexed { i, label ->
+                        val selected = pagerState.currentPage == i
+                        val color by animateColorAsState(
+                            targetValue = if (selected) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                            animationSpec = tween(220), label = "statTab$i"
+                        )
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .clickable(role = Role.Tab) {
+                                    scope.launch {
+                                        pagerState.animateScrollToPage(
+                                            i,
+                                            animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                                        )
+                                    }
+                                }
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Text(label, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = color)
+                        }
+                    }
+                }
+                // One indicator pill, centred under the active tab,
+                // sliding with the scroll offset. No per-tab indicator
+                // and no divider, so there is nothing to misalign.
+                Box(modifier = Modifier.fillMaxWidth().height(3.dp)) {
                     Box(
                         modifier = Modifier
-                            .padding(top = 4.dp)
                             .size(20.dp, 3.dp)
+                            .offset {
+                                val centrePx = tabWidthPx * (pageOffset + 0.5f) - 10.dp.toPx()
+                                IntOffset(centrePx.roundToInt(), 0)
+                            }
                             .clip(RoundedCornerShape(3.dp))
-                            .background(if (selected) Accent else Color.Transparent)
+                            .background(Accent)
                     )
                 }
             }
@@ -1711,6 +1767,9 @@ fun SettingsContent(
     var previewRecording by remember { mutableStateOf(false) }
     var previewTranscribing by remember { mutableStateOf(false) }
     var previewResult by remember { mutableStateOf(BubblePreviewResult.NONE) }
+    // Settings model list: models that do not fit are hidden by
+    // default, revealed by "See more" at the end of the list.
+    var showAllModels by rememberSaveable { mutableStateOf(false) }
     val downloadStates by vm.downloadStates.collectAsState()
     // A tap restarts the sequence; the run id stops an older sequence
     // from overwriting the new one after its delays.
@@ -1947,7 +2006,10 @@ fun SettingsContent(
                     Spacer(Modifier.height(12.dp))
                     Text("Models", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                     Spacer(Modifier.height(6.dp))
-                    ModelCatalog.all.forEach { model ->
+                    val hiddenModels = ModelCatalog.all.filter { !it.fits(totalRam, lowRam) }
+                    val visibleModels = if (showAllModels) ModelCatalog.all
+                    else ModelCatalog.all.filter { it.fits(totalRam, lowRam) || it.id == prefs.localModelId }
+                    visibleModels.forEach { model ->
                         val state = downloadStates[model.id] ?: ModelDownloadState.NotDownloaded
                         ModelRow(
                             model = model,
@@ -1963,6 +2025,17 @@ fun SettingsContent(
                             onDelete = { vm.deleteModel(model.id) }
                         )
                         Spacer(Modifier.height(10.dp))
+                    }
+                    if (hiddenModels.isNotEmpty()) {
+                        Text(
+                            if (showAllModels) "See less" else "See more (${hiddenModels.size} hidden)",
+                            color = Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .clickable(role = Role.Button) { showAllModels = !showAllModels }
+                                .padding(vertical = 12.dp)
+                        )
                     }
                     Text(
                         "Models download once and live on this phone only. On-device dictation works offline and never uses Groq quota.",
@@ -2160,6 +2233,7 @@ private fun ModelRow(
                 else -> when (state) {
                     is ModelDownloadState.NotDownloaded -> ModelAction(text = "Download", onClick = onDownload)
                     is ModelDownloadState.Downloading -> ModelAction(text = "Pause", onClick = onPause)
+                    is ModelDownloadState.Retrying -> ModelAction(text = "Pause", onClick = onPause)
                     is ModelDownloadState.Paused -> {
                         ModelAction(text = "Resume", onClick = onDownload)
                         Spacer(Modifier.width(12.dp))
@@ -2189,6 +2263,14 @@ private fun ModelRow(
             is ModelDownloadState.Paused -> {
                 Text(
                     "Paused — ${state.partialBytes / (1024 * 1024)} MB downloaded",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+            is ModelDownloadState.Retrying -> {
+                Text(
+                    "Retrying… attempt ${state.attempt} of ${state.maxAttempts} (${state.message})",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
                     modifier = Modifier.padding(top = 6.dp)
@@ -2228,6 +2310,8 @@ private fun engineStatusText(prefs: Prefs, downloadStates: Map<String, ModelDown
             "Active: On-device · ${model.name} (still downloading — Groq covers dictation until it lands)."
         is ModelDownloadState.Paused ->
             "Active: On-device · ${model.name} (download paused — Groq covers dictation until it lands)."
+        is ModelDownloadState.Retrying ->
+            "Active: On-device · ${model.name} (download retrying after a network error — Groq covers dictation until it lands)."
         else ->
             "Active: On-device · ${model.name} (not downloaded yet — Groq covers dictation until it lands)."
     }
@@ -2239,13 +2323,13 @@ fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult 
     val size = prefs.bubbleSize.dp
     // Same morph as the real bubble: idle is the user's selected shape
     // (circle, or the 1.9x pill); recording expands to the smaller
-    // 2.2x capsule; transcribing and inserted collapse back to the idle
+    // 2.0x capsule; transcribing and inserted collapse back to the idle
     // shape; copied stays a 1.9x pill because "Copied" cannot fit in a
     // circle. The width animates (280 ms, FastOutSlowInEasing) instead
-    // of snapping. Seven-bar trace still fits the 2.2x capsule — see
+    // of snapping. Seven-bar trace still fits the 2.0x capsule — see
     // BubbleService.applyState for the matching native widths.
     val width = when {
-        recording -> size * 2.2f
+        recording -> size * 2.0f
         transcribing -> if (prefs.bubbleShape == "pill") size * 1.9f else size
         result == BubblePreviewResult.INSERTED -> if (prefs.bubbleShape == "pill") size * 1.9f else size
         result == BubblePreviewResult.COPIED || prefs.bubbleShape == "pill" -> size * 1.9f
@@ -2297,50 +2381,51 @@ fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult 
         } else if (result == BubblePreviewResult.COPIED) {
             Text("Copied", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         } else if (transcribing) {
-            // Thinking dots: three dots bobbing on staggered beats.
-            // Deliberately not bars — the bars mean "I can hear you",
-            // the dots mean "I'm thinking".
-            val transition = rememberInfiniteTransition(label = "thinking")
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                (0..2).forEach { i ->
-                    val offset by transition.animateFloat(
-                        initialValue = 0f,
-                        targetValue = -6f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 900, delayMillis = i * 180, easing = FastOutSlowInEasing),
-                            repeatMode = RepeatMode.Reverse
-                        ),
-                        label = "dotOffset$i"
-                    )
-                    val dotAlpha by transition.animateFloat(
-                        initialValue = 0.45f,
-                        targetValue = 1f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 900, delayMillis = i * 180, easing = FastOutSlowInEasing),
-                            repeatMode = RepeatMode.Reverse
-                        ),
-                        label = "dotAlpha$i"
-                    )
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .offset(y = offset.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Color.White.copy(alpha = dotAlpha))
-                    )
-                }
-            }
+            // One complete big round breathing on and off — no dots in
+            // a row, no box edges. The round itself is the loading
+            // state: it grows and fades on the same ~2.4 s beat as the
+            // outer glow and pulse. Deliberately not bars — the bars
+            // mean "I can hear you", the round means "I'm thinking".
+            val transition = rememberInfiniteTransition(label = "breathingRound")
+            val breathScale by transition.animateFloat(
+                initialValue = 1f, targetValue = 1.18f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "breathScale"
+            )
+            val breathAlpha by transition.animateFloat(
+                initialValue = 0.55f, targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "breathAlpha"
+            )
+            Box(
+                modifier = Modifier
+                    .size(size * 0.62f)
+                    .graphicsLayer {
+                        scaleX = breathScale
+                        scaleY = breathScale
+                        alpha = breathAlpha
+                    }
+                    .clip(CircleShape)
+                    .background(Color.White)
+            )
         } else if (recording && prefs.showWaveform) {
-            // Seven-bar voice trace, tall: newest bar brightest, older bars
-            // fading with age as they scroll left.
+            // Seven-bar voice trace, shorter and eased: newest bar
+            // brightest, older bars fading with age as they scroll
+            // left. The slower swell (900 ms) reads as smooth, not hard.
             val transition = rememberInfiniteTransition(label = "waveform")
             Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
-                listOf(10, 15, 20, 28, 20, 15, 10).forEachIndexed { i, h ->
+                listOf(8, 12, 16, 22, 16, 12, 8).forEachIndexed { i, h ->
                     val scale by transition.animateFloat(
                         initialValue = 0.45f,
-                        targetValue = 1.6f,
+                        targetValue = 1.35f,
                         animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 700, delayMillis = i * 90, easing = FastOutSlowInEasing),
+                            animation = tween(durationMillis = 900, delayMillis = i * 90, easing = FastOutSlowInEasing),
                             repeatMode = RepeatMode.Reverse
                         ),
                         label = "waveBar$i"
@@ -2376,6 +2461,17 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
     val scope = rememberCoroutineScope()
     val recorder = remember { WavRecorder() }
     var recordingFile by remember { mutableStateOf<File?>(null) }
+
+    // Leaving the demo mid-recording must stop the microphone: the
+    // recorder is remembered with this screen, and without disposal
+    // its thread would keep running after the screen is gone.
+    DisposableEffect(Unit) {
+        onDispose {
+            if (recorder.isRecording()) {
+                try { recorder.stop(File(context.cacheDir, "demo_recording.wav")) } catch (_: Exception) { }
+            }
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(22.dp)) {
         AnimItem(0) {
@@ -2539,7 +2635,7 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
                     contentScale = ContentScale.Crop
                 )
                 Text("About OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp))
-                Text("Version 2.4.0", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                Text("Version 2.4.1", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
             }
         }
         AnimItem(2) {

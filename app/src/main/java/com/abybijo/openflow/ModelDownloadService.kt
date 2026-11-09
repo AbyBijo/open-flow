@@ -24,6 +24,8 @@ sealed class ModelDownloadState {
     data class Downloading(val fraction: Float) : ModelDownloadState()
     data class Paused(val partialBytes: Long) : ModelDownloadState()
     object Downloaded : ModelDownloadState()
+    /** A transient failure (HTTP error, dropped connection): retrying automatically, partial kept. */
+    data class Retrying(val attempt: Int, val maxAttempts: Int, val message: String) : ModelDownloadState()
     data class Failed(val message: String) : ModelDownloadState()
 }
 
@@ -128,7 +130,14 @@ class ModelDownloadService : Service() {
                         )
                         updateNotification(model, progress.fraction)
                     },
-                    isCancelled = { stopRequested }
+                    isCancelled = { stopRequested },
+                    onRetry = { attempt, maxAttempts, message ->
+                        ModelDownloadStates.update(
+                            modelId,
+                            ModelDownloadState.Retrying(attempt, maxAttempts, message)
+                        )
+                        updateNotificationRetrying(model, attempt, maxAttempts)
+                    }
                 )
                 ModelDownloadStates.update(modelId, ModelDownloadState.Downloaded)
                 updateNotificationDone(model)
@@ -196,6 +205,18 @@ class ModelDownloadService : Service() {
             .setContentText("Ready to use on-device in Settings.")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(false)
+            .build()
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+            .notify(NOTIFICATION_ID, notification)
+    }
+
+    private fun updateNotificationRetrying(model: WhisperModel, attempt: Int, maxAttempts: Int) {
+        val notification = Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("Downloading ${model.name}")
+            .setContentText("Connection dropped — retrying ($attempt of $maxAttempts)…")
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setProgress(0, 0, true)
+            .setOngoing(true)
             .build()
         (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
             .notify(NOTIFICATION_ID, notification)

@@ -81,10 +81,11 @@ class BubbleService : Service() {
     private var waveRow: LinearLayout? = null
     private var waveBars: List<View> = emptyList()
     private var liveDot: View? = null
-    /** Three dots for the transcribing state — deliberately not bars. */
-    private var thinkingRow: LinearLayout? = null
-    private var thinkingDots: List<View> = emptyList()
-    private var thinkingAnimators: List<Animator> = emptyList()
+    /** One breathing round for the transcribing state — a single
+     * circle that grows and fades, deliberately not bars and never
+     * a row of dots inside a visible box. */
+    private var breathingCircle: View? = null
+    private var breathingAnimators: List<Animator> = emptyList()
     /** Drag-to-dismiss target (bottom centre, shown only while dragging). */
     private var dismissLayout: LinearLayout? = null
     private var dismissCircle: FrameLayout? = null
@@ -171,7 +172,19 @@ class BubbleService : Service() {
         widthAnimator?.cancel()
         widthAnimator = null
         OpenFlowAccessibilityService.clearPending()
-        try { recorder?.let { } } catch (_: Exception) { }
+        // The service can be killed mid-recording (swiped away, system
+        // reclaim). The recorder must be stopped here, or its thread
+        // keeps running and the microphone stays held after the
+        // service is gone. The audio is discarded — nothing is
+        // transcribed from a killed service.
+        val rec = recorder
+        val file = recordingFile
+        recorder = null
+        recordingFile = null
+        if (rec != null && file != null) {
+            try { rec.stop(file) } catch (_: Exception) { }
+            try { file.delete() } catch (_: Exception) { }
+        }
         try {
             bubbleView?.let { windowManager?.removeView(it) }
         } catch (_: Exception) { }
@@ -274,7 +287,7 @@ class BubbleService : Service() {
                 }
                 alpha = 0.9f
             }
-            val barParams = LinearLayout.LayoutParams(dp(4), dp(16))
+            val barParams = LinearLayout.LayoutParams(dp(4), dp(13))
             barParams.setMargins(dp(2), 0, dp(2), 0)
             waveRow?.addView(bar, barParams)
             bars.add(bar)
@@ -298,49 +311,25 @@ class BubbleService : Service() {
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER
         ))
-        // Thinking dots for the transcribing state. Three dots that bob
-        // and breathe while the words are being worked out — deliberately
-        // not bars, so the two states can never be confused: the bars
-        // mean "I can hear you", the dots mean "I'm thinking".
-        //
-        // The dots bob 5 dp up from centre. Two things used to cut them
-        // off: a ViewGroup clips its children to its own bounds by
-        // default, and the row was exactly as tall as the dots, so the
-        // top of the bob was drawn outside the row and clipped — the
-        // "invisible barrier". So the row is taller than the dots (18 dp
-        // for an 8 dp dot) AND neither the row nor the root clips its
-        // children, so the bob is fully visible in every bubble size.
-        // On the smallest bubble the dots shrink a little (7 dp) so all
-        // three still fit inside the round shape with breathing room.
+        // Breathing round for the transcribing state. One complete
+        // circle that grows and fades while the words are being worked
+        // out — deliberately not bars, so the two states can never be
+        // confused: the bars mean "I can hear you", the round means
+        // "I'm thinking". A single round has no box edges at all, so
+        // the user can never see the "four walls" the old row of dots
+        // sat inside. It is a plain View (no child layout), centred in
+        // the root, which never clips its children.
         root.clipChildren = false
-        thinkingRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            visibility = View.GONE
-            clipChildren = false
-        }
-        val smallBubble = sizePx < dp(56)
-        val dotSize = if (smallBubble) dp(7) else dp(8)
-        val dotMargin = if (smallBubble) dp(2) else dp(3)
-        val dots = mutableListOf<View>()
-        repeat(3) {
-            val dot = View(this).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(Color.WHITE)
-                }
-                alpha = 0.6f
+        val circleSize = (sizePx * 0.62).toInt()
+        breathingCircle = View(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.WHITE)
             }
-            val dotParams = LinearLayout.LayoutParams(dotSize, dotSize)
-            dotParams.setMargins(dotMargin, 0, dotMargin, 0)
-            thinkingRow?.addView(dot, dotParams)
-            dots.add(dot)
+            alpha = 0.55f
+            visibility = View.GONE
         }
-        thinkingDots = dots
-        root.addView(thinkingRow, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            dp(18), Gravity.CENTER
-        ))
+        root.addView(breathingCircle, FrameLayout.LayoutParams(circleSize, circleSize, Gravity.CENTER))
 
         val metrics = resources.displayMetrics
         val widthPx = metrics.widthPixels
@@ -533,7 +522,6 @@ class BubbleService : Service() {
         private var downY = 0f
         private var startX = 0
         private var startY = 0
-        private var downTime = 0L
         private var dragged = false
         private var holdingToTalk = false
         private val holdRunnable = Runnable {
@@ -553,7 +541,6 @@ class BubbleService : Service() {
                     downY = event.rawY
                     startX = params?.x ?: 0
                     startY = params?.y ?: 0
-                    downTime = System.currentTimeMillis()
                     dragged = false
                     holdingToTalk = false
                     snapAnimator?.cancel()
@@ -621,7 +608,12 @@ class BubbleService : Service() {
                         lastX = params?.x
                         lastY = params?.y
                         if (prefs.snapToEdge) snapToEdge()
-                    } else if (System.currentTimeMillis() - downTime < 500) {
+                    } else {
+                        // A clean press-release is always a tap, however
+                        // long the press lasted. The 500 ms line only
+                        // decides whether a hold-to-talk started; it must
+                        // never silently drop a tap — a slow press to
+                        // stop a recording used to do nothing at all.
                         onBubbleTap()
                     }
                     return true
@@ -661,8 +653,8 @@ class BubbleService : Service() {
         waveRow = null
         waveBars = emptyList()
         liveDot = null
-        thinkingRow = null
-        thinkingDots = emptyList()
+        breathingCircle = null
+        breathingAnimators = emptyList()
         bubbleBg = null
         buildBubble()
     }
@@ -771,17 +763,17 @@ class BubbleService : Service() {
         }
         bg.colors = stateColors
         // Width is the user's idle shape, except while recording: one
-        // tap expands the compact bubble into a 2.2x capsule for the
+        // tap expands the compact bubble into a 2.0x capsule for the
         // seven-bar waveform, and the second tap collapses it back to
-        // the idle shape while the thinking dots run inside it. The
-        // 2.2x capsule is smaller than the old 2.6x one and still fits
+        // the idle shape while the breathing round runs inside it. The
+        // 2.0x capsule is smaller than the old 2.2x one and still fits
         // the bars (7 x 8 dp) plus the live dot with room to spare,
-        // even at the Small bubble size (48 dp -> 106 dp capsule).
+        // even at the Small bubble size (48 dp -> 96 dp capsule).
         // Copied keeps a 1.9x pill: the word "Copied" cannot fit inside
         // a round bubble, whatever shape the user picked.
         val idleWidth = if (prefs.bubbleShape == "pill") (sizePx * 1.9).toInt() else sizePx
         val targetWidth = when (state) {
-            BubbleState.RECORDING -> (sizePx * 2.2).toInt()
+            BubbleState.RECORDING -> (sizePx * 2.0).toInt()
             BubbleState.COPIED -> (sizePx * 1.9).toInt()
             else -> idleWidth
         }
@@ -821,29 +813,29 @@ class BubbleService : Service() {
             checkIcon?.visibility = View.GONE
         }
         copiedText?.visibility = if (state == BubbleState.COPIED) View.VISIBLE else View.GONE
-        // Waveform while recording, thinking dots while transcribing.
-        // The bars mean "I can hear you", the dots mean "I'm thinking".
+        // Waveform while recording, breathing round while transcribing.
+        // The bars mean "I can hear you", the round means "I'm thinking".
         when (state) {
             BubbleState.RECORDING -> {
                 if (prefs.showWaveform) {
                     waveRow?.visibility = View.VISIBLE
                     liveDot?.visibility = View.VISIBLE
-                    thinkingRow?.visibility = View.GONE
+                    breathingCircle?.visibility = View.GONE
                     startMicWavePoll()
                 } else {
                     waveRow?.visibility = View.GONE
-                    thinkingRow?.visibility = View.GONE
+                    breathingCircle?.visibility = View.GONE
                     stopWaveAnimation()
                 }
             }
             BubbleState.TRANSCRIBING -> {
                 waveRow?.visibility = View.GONE
-                thinkingRow?.visibility = View.VISIBLE
-                startThinkingAnimation()
+                breathingCircle?.visibility = View.VISIBLE
+                startBreathingAnimation()
             }
             else -> {
                 waveRow?.visibility = View.GONE
-                thinkingRow?.visibility = View.GONE
+                breathingCircle?.visibility = View.GONE
                 stopWaveAnimation()
             }
         }
@@ -851,32 +843,39 @@ class BubbleService : Service() {
     }
 
     /**
-     * Transcribing, made unmistakable: three dots bobbing up and down
-     * on staggered beats, over a slow breathing glow (~2.4 s cycle)
-     * and a gentle pill pulse in step with it. Nothing here moves like
-     * a bar, so it can never be mistaken for listening.
+     * Transcribing, made unmistakable: one big round breathing on and
+     * off (grows and fades on a ~2.4 s cycle), over a slow breathing
+     * glow and a gentle pill pulse in step with it. Nothing here moves
+     * like a bar, so it can never be mistaken for listening — and a
+     * single round has no box edges for the user to see.
      */
-    private fun startThinkingAnimation() {
+    private fun startBreathingAnimation() {
         stopWaveAnimation()
         val bg = bubbleBg ?: return
         val view = bubbleView ?: return
-        val dotAnimators = thinkingDots.mapIndexed { i, dot ->
-            ObjectAnimator.ofFloat(dot, "translationY", 0f, -dp(5).toFloat(), 0f).apply {
-                duration = 900L
-                startDelay = i * 180L
-                repeatCount = ValueAnimator.INFINITE
-                interpolator = AccelerateDecelerateInterpolator()
-                start()
-            }
-        } + thinkingDots.mapIndexed { i, dot ->
-            ObjectAnimator.ofFloat(dot, "alpha", 0.45f, 1f).apply {
-                duration = 900L
-                startDelay = i * 180L
-                repeatCount = ValueAnimator.INFINITE
-                repeatMode = ValueAnimator.REVERSE
-                interpolator = AccelerateDecelerateInterpolator()
-                start()
-            }
+        val circle = breathingCircle ?: return
+        // The round itself breathes: scale 1.0 -> 1.18 and alpha
+        // 0.55 -> 1.0, both easing in and out on the same beat.
+        val breatheScaleX = ObjectAnimator.ofFloat(circle, "scaleX", 1f, 1.18f).apply {
+            duration = 1200L
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            interpolator = AccelerateDecelerateInterpolator()
+            start()
+        }
+        val breatheScaleY = ObjectAnimator.ofFloat(circle, "scaleY", 1f, 1.18f).apply {
+            duration = 1200L
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            interpolator = AccelerateDecelerateInterpolator()
+            start()
+        }
+        val breatheAlpha = ObjectAnimator.ofFloat(circle, "alpha", 0.55f, 1f).apply {
+            duration = 1200L
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            interpolator = AccelerateDecelerateInterpolator()
+            start()
         }
         val glowAnimator = ObjectAnimator.ofInt(
             bg, "alpha", (bubbleBaseAlpha * 0.8f).toInt(), bubbleBaseAlpha
@@ -900,29 +899,19 @@ class BubbleService : Service() {
             interpolator = AccelerateDecelerateInterpolator()
             start()
         }
-        thinkingAnimators = dotAnimators + glowAnimator + pulseX + pulseY
+        breathingAnimators = listOf(breatheScaleX, breatheScaleY, breatheAlpha, glowAnimator, pulseX, pulseY)
     }
 
     /**
      * Mic-driven waveform: every 55 ms the live level is read and the
-     * bars shift left, newest on the right. The level is smoothed with
-     * a fast attack (jump straight up, ~one poll) and a slow release
-     * (~200 ms decay), so the bars move fluidly and never jitter.
-     * Bar heights and the dot's brightness are set directly on the
-     * Views — draw-phase properties, no layout, no recomposition.
-     * The level array is a primitive FloatArray: nothing is allocated
-     * in this loop.
-     */
-    /**
-     * Mic-driven waveform: every 55 ms the live level is read and the
      * bars shift left, newest on the right — a scrolling voice trace,
-     * not a static row. The level is smoothed with a fast attack (jump
-     * straight up, ~one poll) and a slow release (~200 ms decay), so
-     * the bars move fluidly and never jitter. Older bars fade with
-     * age, newest brightest. Bar heights and the dot's brightness are
-     * set directly on the Views — draw-phase properties, no layout,
-     * no recomposition. The level array is a primitive FloatArray:
-     * nothing is allocated in this loop.
+     * not a static row. The level is eased, never stepped: it rises
+     * toward a louder sound at 45% per poll and falls back at 20% per
+     * poll, so the bars swell and settle smoothly instead of jumping.
+     * Older bars fade with age, newest brightest. Bar heights and the
+     * dot's brightness are set directly on the Views — draw-phase
+     * properties, no layout, no recomposition. The level array is a
+     * primitive FloatArray: nothing is allocated in this loop.
      */
     private fun startMicWavePoll() {
         stopWaveAnimation()
@@ -931,12 +920,16 @@ class BubbleService : Service() {
         wavePollJob = scope.launch {
             while (state == BubbleState.RECORDING) {
                 val raw = recorder?.amplitude() ?: 0.2f
-                smoothLevel = if (raw >= smoothLevel) raw
-                else smoothLevel + (raw - smoothLevel) * 0.24f
+                // Eased, not stepped: a loud sound swells the bars up
+                // over a few polls, silence lets them settle down.
+                // The old code jumped straight to the new level on
+                // every rise, which read as hard and jittery.
+                val rate = if (raw >= smoothLevel) 0.45f else 0.20f
+                smoothLevel += (raw - smoothLevel) * rate
                 for (i in 0 until WAVE_BAR_COUNT - 1) waveLevels[i] = waveLevels[i + 1]
                 waveLevels[WAVE_BAR_COUNT - 1] = smoothLevel
                 for (i in waveBars.indices) {
-                    waveBars[i].scaleY = 0.35f + waveLevels[i] * 1.5f
+                    waveBars[i].scaleY = 0.35f + waveLevels[i] * 1.35f
                     waveBars[i].alpha = 0.35f + 0.65f * (i.toFloat() / (WAVE_BAR_COUNT - 1))
                 }
                 liveDot?.alpha = 0.3f + smoothLevel * 0.7f
@@ -948,8 +941,11 @@ class BubbleService : Service() {
     private fun stopWaveAnimation() {
         wavePollJob?.cancel()
         wavePollJob = null
-        thinkingAnimators.forEach { try { it.cancel() } catch (_: Exception) { } }
-        thinkingAnimators = emptyList()
+        breathingAnimators.forEach { try { it.cancel() } catch (_: Exception) { } }
+        breathingAnimators = emptyList()
+        breathingCircle?.scaleX = 1f
+        breathingCircle?.scaleY = 1f
+        breathingCircle?.alpha = 0.55f
         bubbleBg?.alpha = bubbleBaseAlpha
         bubbleView?.scaleX = 1f
         bubbleView?.scaleY = 1f
