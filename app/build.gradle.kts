@@ -12,8 +12,8 @@ android {
         applicationId = "com.abybijo.openflow"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "2.4.2"
+        versionCode = 15
+        versionName = "2.4.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters += listOf("arm64-v8a")

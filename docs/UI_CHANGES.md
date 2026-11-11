@@ -1,5 +1,14 @@
 # UI / UX changes (on top of v2.3.0)
 
+## v2.4.3
+
+- Cancel X on the recording waveform: a small X sits at the right end of the bubble's bars (and next to the demo bubble) — one tap cancels the dictation, discards the audio, and transcribes nothing. It never counts as a tap-to-stop or a drag start.
+- Faster insert outside the app: the insert used to wait 2–5 s in other apps because right after the overlay tap the system still reported our own window as active, wave 1 burned its attempts on it, and wave 2 waited out its schedule. The insert now resolves the host app's window directly from the window list, wave 1 retries at 100 ms, and wave 2 runs 100/250/500/900/1400 ms — a successful insert lands in well under a second. Paste safety is unchanged: password/banking guard, hint handling, post-write verification, clipboard restore.
+- Waveform is more reactive: quiet speech lifts the bars visibly (square-root height mapping, faster attack) while loud speech still stops at the same peak — the cap never moved. No left-to-right fade any more; all bars share one alpha.
+- Start chime: two short "du du" tones on the music stream when a dictation starts, in the bubble and in the demo. Silent mode mutes it.
+- Loading is three dots now, not the big breathing circle: a loading screen cannot fit the small overlay, and opening one would cover the app being dictated into. The dots animate alpha only — nothing is scaled past the window bounds, which is what used to clip the breathing round at the bubble's edges. The bubble stays a 2.0x capsule while loading so the dots have room.
+- Drag-to-dismiss: the whole dismiss bar slides up from the bottom when a drag starts and slides down out of view when it ends. The X icon itself never animates. The target is a 96 dp circle so the bubble fits inside it at every size, and while the bubble is over it the solid disc becomes a ring so the bubble stays visible inside. The bar is measured from the start (invisible, not gone) so the full red circle is never clipped at the top, and the magnetise aims at the circle's real resting centre.
+
 ## v2.4.2
 
 - Speed is the headline again: the encoder context is now sized to the actual clip instead of always running the full 30 seconds (about twice as fast on the encoder for typical short dictations), silence is trimmed off both ends before the model sees it, and the local path transcribes the in-memory samples in one call — no WAV read-back, no 30-second chunk files on disk. Temperature 0 and non-speech suppression cut wasted decode steps. The release build's RelWithDebInfo configuration now gets -O3 as well.

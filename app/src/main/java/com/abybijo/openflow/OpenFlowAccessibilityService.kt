@@ -36,12 +36,20 @@ import kotlinx.coroutines.launch
  *
  * Wave 2 is event-driven: if wave 1 fails, the text is staged as pending
  * and retried when the host app regains focus (focus / window-state /
- * content events) and on a timed schedule (250/500/900/1400/2000 ms). It
- * gives up only after the last retry + 300 ms — later still if the
+ * content events) and on a short timed schedule (100/250/500/900/1400 ms).
+ * It gives up only after the last retry + 300 ms — later still if the
  * keyboard is open, which means a field exists even when no editable
  * node was found. The pending insert only ever fires into the app the
  * dictation started in; if the user switches to another app it is
  * dropped, and if the bubble is dismissed it is dropped too.
+ *
+ * The insert resolves the host app's window directly from the window
+ * list when the active window is our own overlay: right after the
+ * user taps the bubble, the system can still report our window as
+ * active, and wave 1 used to burn its attempts on it and then wait
+ * out wave 2's schedule — the 2–5 seconds the user measured outside
+ * the app. A successful insert reports at once; the retry schedule
+ * only runs while every attempt is still failing.
  *
  * Never inserts into password fields, and never into banking or
  * password-manager apps — those always fall back to the clipboard.
@@ -110,8 +118,12 @@ class OpenFlowAccessibilityService : AccessibilityService() {
 
     private enum class InsertOutcome { INSERTED, WRONG_APP, RETRY }
 
-    /** Timed retries for a staged insert, milliseconds after staging. */
-    private val retryDelays = longArrayOf(250, 500, 900, 1400, 2000)
+    /** Timed retries for a staged insert, milliseconds after staging.
+     * Tight on purpose: the whole point of wave 2 is to land fast
+     * once the host window is ready, not to wait the schedule out.
+     * A successful insert reports at once — the schedule only runs
+     * while every attempt is still failing. */
+    private val retryDelays = longArrayOf(100, 250, 500, 900, 1400)
     /** Hard cap for the whole pending phase, including IME-open extensions. */
     private val pendingHardCapMs = 10_000L
 
@@ -209,22 +221,56 @@ class OpenFlowAccessibilityService : AccessibilityService() {
                 InsertOutcome.WRONG_APP -> return false
                 InsertOutcome.RETRY -> { /* keep trying */ }
             }
-            if (attempt < 2) delay(200)
+            if (attempt < 2) delay(100)
         }
         return false
     }
 
-    private fun attemptInsert(text: String, hostPackage: String?): InsertOutcome {
-        val root = rootInActiveWindow ?: return InsertOutcome.RETRY
-        val rootPkg = root.packageName?.toString()
-        // Our own window in front (the review screen is still closing):
-        // never insert into our own fields — wait for the host app.
-        if (rootPkg == packageName) {
-            try { root.recycle() } catch (_: Exception) { }
-            return InsertOutcome.RETRY
+    /**
+     * Root of the window to insert into. The active window is usually
+     * the host app — but right after the user taps our overlay, the
+     * system can still report OUR window (the bubble, or the review
+     * screen closing) as active. Wave 1 used to burn all three of its
+     * attempts on that window and then wait out wave 2's schedule
+     * before the host window became active again — the 2–5 seconds
+     * the user measured outside the app. So when the active window
+     * is ours (or missing), resolve the host app's own window
+     * directly from the window list instead of waiting for the
+     * active window to settle. The returned node belongs to the
+     * caller; the active-window node is recycled here when unused.
+     */
+    private fun hostRoot(hostPackage: String?): AccessibilityNodeInfo? {
+        val active = rootInActiveWindow
+        if (active != null) {
+            val pkg = active.packageName?.toString()
+            if (pkg != null && pkg != packageName) return active
+            try { active.recycle() } catch (_: Exception) { }
         }
-        // Never fire into the wrong app: the active window must be the
-        // app the dictation started in.
+        try {
+            val wins = windows ?: return null
+            for (w in wins) {
+                if (w.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+                val root = w.root ?: continue
+                val pkg = root.packageName?.toString()
+                if (pkg == packageName) {
+                    try { root.recycle() } catch (_: Exception) { }
+                    continue
+                }
+                if (hostPackage != null && pkg != hostPackage) {
+                    try { root.recycle() } catch (_: Exception) { }
+                    continue
+                }
+                return root
+            }
+        } catch (_: Exception) { }
+        return null
+    }
+
+    private fun attemptInsert(text: String, hostPackage: String?): InsertOutcome {
+        val root = hostRoot(hostPackage) ?: return InsertOutcome.RETRY
+        val rootPkg = root.packageName?.toString()
+        // Never fire into the wrong app: the window must be the app
+        // the dictation started in.
         if (rootPkg != null && hostPackage != null && rootPkg != hostPackage) {
             try { root.recycle() } catch (_: Exception) { }
             return InsertOutcome.WRONG_APP

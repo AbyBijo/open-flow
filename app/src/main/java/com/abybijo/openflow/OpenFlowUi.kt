@@ -2334,19 +2334,24 @@ fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult 
     val size = prefs.bubbleSize.dp
     // Same morph as the real bubble: idle is the user's selected shape
     // (circle, or the 1.9x pill); recording expands to the smaller
-    // 2.0x capsule; transcribing and inserted collapse back to the idle
-    // shape; copied stays a 1.9x pill because "Copied" cannot fit in a
-    // circle. The width animates (280 ms, FastOutSlowInEasing) instead
-    // of snapping. Seven-bar trace still fits the 2.0x capsule — see
+    // 2.0x capsule; transcribing stays a 2.0x capsule for the three
+    // dots — shrinking back to a round bubble while thinking is what
+    // used to clip the loading animation at the bubble's edges;
+    // inserted collapses back to the idle shape; copied stays a 1.9x
+    // pill because "Copied" cannot fit in a circle. The width
+    // animates (280 ms, FastOutSlowInEasing) instead of snapping.
+    // Seven-bar trace still fits the 2.0x capsule — see
     // BubbleService.applyState for the matching native widths.
     val width = when {
         recording -> size * 2.0f
-        transcribing -> if (prefs.bubbleShape == "pill") size * 1.9f else size
+        transcribing -> size * 2.0f
         result == BubblePreviewResult.INSERTED -> if (prefs.bubbleShape == "pill") size * 1.9f else size
         result == BubblePreviewResult.COPIED || prefs.bubbleShape == "pill" -> size * 1.9f
         else -> size
     }
-    // Breathing glow + gentle pulse while thinking, on a ~2.4 s cycle.
+    // Breathing glow while thinking, on a ~2.4 s cycle. Alpha only —
+    // the old 1.04 pulse scaled the whole bubble past its clip
+    // bounds and cut the loading animation off at the edges.
     // The values are only read when transcribing, so the animation
     // costs nothing in the other states.
     val glowTransition = rememberInfiniteTransition(label = "thinkingGlow")
@@ -2358,22 +2363,12 @@ fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult 
         ),
         label = "glowAlpha"
     )
-    val pulse by glowTransition.animateFloat(
-        initialValue = 1f, targetValue = 1.04f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulse"
-    )
     Box(
         modifier = Modifier
             .size(width, size)
             .animateContentSize(animationSpec = tween(280, easing = FastOutSlowInEasing))
             .graphicsLayer {
                 alpha = if (transcribing) glowAlpha else 1f
-                scaleX = if (transcribing) pulse else 1f
-                scaleY = if (transcribing) pulse else 1f
             }
             .clip(RoundedCornerShape(size / 2))
             .background(
@@ -2392,43 +2387,37 @@ fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult 
         } else if (result == BubblePreviewResult.COPIED) {
             Text("Copied", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         } else if (transcribing) {
-            // One complete big round breathing on and off — no dots in
-            // a row, no box edges. The round itself is the loading
-            // state: it grows and fades on the same ~2.4 s beat as the
-            // outer glow and pulse. Deliberately not bars — the bars
-            // mean "I can hear you", the round means "I'm thinking".
-            val transition = rememberInfiniteTransition(label = "breathingRound")
-            val breathScale by transition.animateFloat(
-                initialValue = 1f, targetValue = 1.18f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "breathScale"
-            )
-            val breathAlpha by transition.animateFloat(
-                initialValue = 0.55f, targetValue = 1f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "breathAlpha"
-            )
-            Box(
-                modifier = Modifier
-                    .size(size * 0.62f)
-                    .graphicsLayer {
-                        scaleX = breathScale
-                        scaleY = breathScale
-                        alpha = breathAlpha
-                    }
-                    .clip(CircleShape)
-                    .background(Color.White)
-            )
+            // Three dots fading in and out in turn — the loading
+            // state. A full loading screen cannot fit this small
+            // overlay, and opening one would cover the app the user
+            // is dictating into. The dots animate alpha only, so
+            // nothing is scaled past the clip bounds the way the old
+            // breathing round was. Deliberately not bars — the bars
+            // mean "I can hear you", the dots mean "I'm thinking".
+            val transition = rememberInfiniteTransition(label = "thinkingDots")
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                repeat(3) { i ->
+                    val dotAlpha by transition.animateFloat(
+                        initialValue = 0.3f, targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(durationMillis = 500, delayMillis = i * 160, easing = FastOutSlowInEasing),
+                            repeatMode = RepeatMode.Reverse
+                        ),
+                        label = "dotAlpha$i"
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = dotAlpha))
+                    )
+                }
+            }
         } else if (recording && prefs.showWaveform) {
-            // Seven-bar voice trace, shorter and eased: newest bar
-            // brightest, older bars fading with age as they scroll
-            // left. The slower swell (900 ms) reads as smooth, not hard.
+            // Seven-bar voice trace, faster swell: the bars react to
+            // the voice instead of drifting. All bars share one
+            // alpha — no left-to-right fade, the row reads as one
+            // voice trace. Peak height is unchanged.
             val transition = rememberInfiniteTransition(label = "waveform")
             Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
                 listOf(8, 12, 16, 22, 16, 12, 8).forEachIndexed { i, h ->
@@ -2436,7 +2425,7 @@ fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult 
                         initialValue = 0.45f,
                         targetValue = 1.35f,
                         animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 900, delayMillis = i * 90, easing = FastOutSlowInEasing),
+                            animation = tween(durationMillis = 550, delayMillis = i * 60, easing = FastOutSlowInEasing),
                             repeatMode = RepeatMode.Reverse
                         ),
                         label = "waveBar$i"
@@ -2446,7 +2435,7 @@ fun BubblePreview(prefs: Prefs, recording: Boolean, result: BubblePreviewResult 
                             .width(4.dp)
                             .height((h * scale).dp)
                             .clip(RoundedCornerShape(2.dp))
-                            .background(Color.White.copy(alpha = 0.35f + 0.65f * (i / 10f)))
+                            .background(Color.White.copy(alpha = 0.9f))
                     )
                 }
             }
@@ -2521,7 +2510,36 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
             // The tap target IS the bubble itself: it wraps the preview, so
             // the whole pill — including the wide recording state — is
             // tappable. A fixed 72 dp box used to miss most of the pill.
-            Box(modifier = Modifier.fillMaxWidth().height(96.dp), contentAlignment = Alignment.CenterEnd) {
+            // While recording, a small X sits next to it: one tap cancels
+            // the dictation — audio discarded, nothing transcribed.
+            Row(
+                modifier = Modifier.fillMaxWidth().height(96.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (bubbleState == 1) {
+                    Box(
+                        modifier = Modifier.size(40.dp).clip(CircleShape)
+                            .background(Color(0xFFEF4444))
+                            .clickable {
+                                try { recorder.stop(File(context.cacheDir, "demo_recording.wav")) } catch (_: Exception) { }
+                                try { recordingFile?.delete() } catch (_: Exception) { }
+                                recordingFile = null
+                                bubbleState = 0
+                                fieldHint = "Type a message"
+                                fieldText = ""
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Image(
+                            painter = painterResource(R.drawable.ic_close),
+                            contentDescription = "Cancel dictation",
+                            modifier = Modifier.size(20.dp),
+                            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White)
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                }
                 Box(
                     modifier = Modifier.clickable {
                         when (bubbleState) {
@@ -2537,6 +2555,7 @@ fun DemoScreen(vm: MainViewModel, onClose: () -> Unit, onRequestMic: () -> Unit,
                                         bubbleState = 1
                                         fieldHint = "Listening..."
                                         fieldText = ""
+                                        DictationChime.play(context)
                                     } else {
                                         onToast("Could not start the microphone.")
                                     }
@@ -2647,7 +2666,7 @@ fun AboutScreen(onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
                     contentScale = ContentScale.Crop
                 )
                 Text("About OpenFlow", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp))
-                Text("Version 2.4.2", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                Text("Version 2.4.3", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
             }
         }
         AnimItem(2) {
